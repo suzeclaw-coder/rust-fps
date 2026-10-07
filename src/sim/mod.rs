@@ -1241,6 +1241,29 @@ fn apply_damage(
                 }
             }
         }
+        if !killed {
+            let hit_zone = if headshot {
+                crate::ragdoll::HitZone::Head
+            } else if legs {
+                crate::ragdoll::HitZone::LeftLeg
+            } else {
+                crate::ragdoll::HitZone::Torso
+            };
+            let impulse_vec = if brain.knockback.length_squared() > 0.01 {
+                brain.knockback
+            } else if let Some(pid) = from.and_then(|id| roster.0.get(&id)) {
+                (pos - pid.feet()).with_y(0.0).normalize_or_zero() * (amount * 0.08).clamp(2.0, 10.0)
+            } else {
+                Vec3::ZERO
+            };
+            if impulse_vec != Vec3::ZERO {
+                commands.entity(target).try_insert(crate::ragdoll::HitImpulse {
+                    hit_zone,
+                    impulse: impulse_vec,
+                    stun,
+                });
+            }
+        }
         if killed {
             let hit_h = if headshot { 1.5 } else if legs { 0.4 } else { 1.0 };
             let hit_pos = pos + Vec3::Y * (hit_h * enemy_scale(brain.kind));
@@ -1278,7 +1301,33 @@ fn apply_damage(
                     },
                 );
             }
-            crate::zombies::kill(&mut commands, target);
+            let hit_zone = if headshot {
+                crate::ragdoll::HitZone::Head
+            } else if legs {
+                crate::ragdoll::HitZone::LeftLeg
+            } else if brain.knockback.length() > 8.0 {
+                crate::ragdoll::HitZone::FullBodyExplosion
+            } else {
+                crate::ragdoll::HitZone::Torso
+            };
+            let force = if brain.knockback.length() > 0.1 {
+                brain.knockback.length().clamp(6.0, 24.0)
+            } else if headshot {
+                14.0
+            } else {
+                10.0
+            };
+            let impulse_vec = shot_dir * force;
+            crate::zombies::kill_with_impulse(
+                &mut commands,
+                target,
+                crate::ragdoll::DeathImpulse {
+                    hit_zone,
+                    point_of_impact: hit_pos,
+                    impulse: impulse_vec,
+                    headshot,
+                },
+            );
             if let NetKind::Boss(level) = brain.kind {
                 boss_down = Some(level);
                 continue;

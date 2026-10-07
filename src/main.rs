@@ -38,6 +38,7 @@ mod physics;
 mod pings;
 mod player;
 mod progression;
+mod ragdoll;
 mod rig;
 mod sim;
 mod ui;
@@ -692,6 +693,7 @@ fn main() {
     .add_plugins(audio::AudioPlugin)
     .add_plugins((
         rig::RigPlugin,
+        ragdoll::RagdollPlugin,
         zombies::ZombiePlugin,
         auras::AuraPlugin,
         progression::ProgressionPlugin,

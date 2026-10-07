@@ -420,6 +420,7 @@ fn dress(
             commands.entity(root).insert((
                 Enemy,
                 EnemyStatus::default(),
+                crate::ragdoll::SlaveController::default(),
                 EnemyLook(body.clone(), 0.0, base, base_glow),
                 Transform::from_translation(pos).with_scale(Vec3::splat(enemy_scale(kind))),
             ));

@@ -45,22 +45,66 @@ pub fn kill(commands: &mut Commands, e: Entity) {
     }
 }
 
+/// Removes `e` from play with a directional ballistic death impulse.
+pub fn kill_with_impulse(commands: &mut Commands, e: Entity, impulse: crate::ragdoll::DeathImpulse) {
+    if let Ok(mut ent) = commands.get_entity(e) {
+        ent.try_insert((Killed, impulse));
+    }
+}
+
 fn start_dying(
     mut commands: Commands,
-    killed: Query<(Entity, Has<Enemy>, Has<Rig>, Option<&crate::sim::EnemyBrain>), Added<Killed>>,
+    killed: Query<(
+        Entity,
+        &Transform,
+        Has<Enemy>,
+        Has<Rig>,
+        Option<&crate::sim::EnemyBrain>,
+        Option<&crate::ragdoll::DeathImpulse>,
+    ), Added<Killed>>,
 ) {
     let mut rng = rand::thread_rng();
-    for (e, enemy, rig, brain) in &killed {
+    for (e, tf, enemy, rig, brain, death_impulse) in &killed {
         if enemy && rig {
             let is_sprinter = brain.is_some_and(|b| b.is_sprinter);
+            let crawler = brain.is_some_and(|b| b.crawler);
+            let scale = tf.scale.x;
+
+            let mut ragdoll = crate::ragdoll::ActiveRagdoll::new(
+                tf.translation,
+                tf.rotation,
+                scale,
+                crawler,
+            );
+
+            if let Some(impulse) = death_impulse {
+                ragdoll.apply_impulse(impulse);
+            } else if let Some(b) = brain {
+                if b.knockback.length_squared() > 0.01 {
+                    ragdoll.apply_impulse(&crate::ragdoll::DeathImpulse {
+                        hit_zone: crate::ragdoll::HitZone::Torso,
+                        point_of_impact: tf.translation + Vec3::Y * 0.9,
+                        impulse: b.knockback,
+                        headshot: false,
+                    });
+                }
+            }
+
+            if is_sprinter {
+                // High-momentum sprinters carry forward velocity into the active ragdoll
+                let fwd = tf.rotation * Vec3::NEG_Z;
+                ragdoll.nodes[crate::ragdoll::RagdollBone::Hips.index()].vel += fwd * 4.5;
+                ragdoll.nodes[crate::ragdoll::RagdollBone::Head.index()].vel += fwd * 5.0;
+            }
+
             let kind = if is_sprinter && rng.gen_bool(0.65) {
-                // High-momentum sprinters faceplant forward violently
                 1
             } else {
                 rng.gen_range(0..3)
             };
+
             // Out of the game straight away (no more shots, nav, snapshots),
-            // but the body stays for its fall.
+            // but the body stays for its active ragdoll simulation.
             commands
                 .entity(e)
                 .remove::<(
@@ -70,10 +114,13 @@ fn start_dying(
                     crate::sim::EnemyBrain,
                     crate::net::Puppet,
                 )>()
-                .insert(Dying {
-                    t: 0.0,
-                    kind,
-                });
+                .insert((
+                    ragdoll,
+                    Dying {
+                        t: 0.0,
+                        kind,
+                    },
+                ));
         } else {
             commands.entity(e).despawn();
         }
@@ -112,17 +159,25 @@ fn sync_rigs(
 fn dying(
     mut commands: Commands,
     time: Res<Time>,
-    mut bodies: Query<(Entity, &mut Dying, &mut Rig, &mut Transform)>,
+    mut bodies: Query<(
+        Entity,
+        &mut Dying,
+        &mut Rig,
+        &mut Transform,
+        Option<&crate::ragdoll::ActiveRagdoll>,
+    )>,
 ) {
     let dt = time.delta_secs();
-    for (e, mut d, mut rig, mut tf) in &mut bodies {
+    for (e, mut d, mut rig, mut tf, maybe_ragdoll) in &mut bodies {
         d.t += dt;
-        rig.dying = Some((d.t, d.kind));
-        if d.t > LIE {
-            tf.translation.y -= dt * 0.6 / SINK;
-        }
-        if d.t > LIE + SINK {
-            commands.entity(e).despawn();
+        if maybe_ragdoll.is_none() {
+            rig.dying = Some((d.t, d.kind));
+            if d.t > LIE {
+                tf.translation.y -= dt * 0.6 / SINK;
+            }
+            if d.t > LIE + SINK {
+                commands.entity(e).despawn();
+            }
         }
     }
 }

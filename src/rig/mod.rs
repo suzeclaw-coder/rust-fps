@@ -440,9 +440,9 @@ impl Rig {
 }
 
 #[derive(Component)]
-struct Joint {
-    owner: Entity,
-    bone: Bone,
+pub struct Joint {
+    pub owner: Entity,
+    pub bone: Bone,
 }
 
 /// Builds a character under `root`. Returns the gun mount if a gun is given.
@@ -565,28 +565,28 @@ pub fn spawn_rig_with(
 
 /// Where a hand goes, in body space (as if the pelvis were at rest).
 #[derive(Clone, Copy)]
-struct Reach {
-    target: Vec3,
+pub struct Reach {
+    pub target: Vec3,
     /// Which way the elbow should point.
-    elbow: Vec3,
+    pub elbow: Vec3,
     /// Hand orientation, in body space (None follows the forearm).
-    hand: Option<Quat>,
+    pub hand: Option<Quat>,
 }
 
 #[derive(Clone, Copy)]
-struct Pose {
-    pelvis_off: Vec3,
-    pelvis: Quat,
-    spine: Quat,
-    neck: Quat,
-    arms: [Reach; 2],
+pub struct Pose {
+    pub pelvis_off: Vec3,
+    pub pelvis: Quat,
+    pub spine: Quat,
+    pub neck: Quat,
+    pub arms: [Reach; 2],
     /// Leg swing forward and knee bend (positive bends).
-    thigh: [f32; 2],
-    knee: [f32; 2],
+    pub thigh: [f32; 2],
+    pub knee: [f32; 2],
     /// Leg spread out to the side.
-    splay: [f32; 2],
+    pub splay: [f32; 2],
     /// Finger curl per hand (0 straight, 1 fist), index to little.
-    fingers: [[f32; 4]; 2],
+    pub fingers: [[f32; 4]; 2],
 }
 
 fn shoulder_rest(side: usize) -> Vec3 {
@@ -612,7 +612,7 @@ fn on_hip(side: usize) -> Reach {
 }
 
 impl Pose {
-    fn rest() -> Self {
+    pub fn rest() -> Self {
         Pose {
             pelvis_off: Vec3::ZERO,
             pelvis: Quat::IDENTITY,
@@ -1492,13 +1492,19 @@ impl ProceduralFootIK {
 fn animate(
     time: Res<Time>,
     guns: Option<Res<crate::gunmodels::GunAssets>>,
-    mut rigs: Query<(Entity, &mut Rig, &GlobalTransform)>,
+    mut rigs: Query<(
+        Entity,
+        &mut Rig,
+        &GlobalTransform,
+        Option<&crate::ragdoll::ActiveRagdoll>,
+        Option<&crate::ragdoll::SlaveController>,
+    )>,
     mut joints: Query<(&Joint, &mut Transform), Without<GunMount>>,
     mut mounts: Query<(&GunMount, &mut Transform, &mut Visibility), Without<Joint>>,
 ) {
     let dt = time.delta_secs().max(1e-4);
     let mut poses: HashMap<Entity, Pose> = HashMap::new();
-    for (entity, mut rig, gt) in &mut rigs {
+    for (entity, mut rig, gt, maybe_ragdoll, maybe_slave) in &mut rigs {
         let pos = gt.translation();
         let moved = (pos - rig.last).with_y(0.0).length() / dt;
         rig.last = pos;
@@ -1604,7 +1610,19 @@ fn animate(
                 }
             }
         }
-        if let Some((t, kind)) = rig.dying {
+        if let Some(slave) = maybe_slave {
+            if slave.upper_recoil.length_squared() > 1e-4 {
+                let rot_x = (slave.upper_recoil.z * 0.4).clamp(-1.0, 1.0);
+                let rot_y = (slave.upper_recoil.x * 0.3).clamp(-1.0, 1.0);
+                pose.spine = pose.spine * Quat::from_rotation_x(rot_x) * Quat::from_rotation_y(rot_y);
+                pose.neck = pose.neck * Quat::from_rotation_x(rot_x * 0.8);
+                pose.pelvis_off.y += (slave.upper_recoil.y * 0.1).clamp(-0.2, 0.2);
+            }
+        }
+        if let Some(ragdoll) = maybe_ragdoll {
+            let (_, rot, _) = gt.to_scale_rotation_translation();
+            pose = ragdoll.extract_pose(rot);
+        } else if let Some((t, kind)) = rig.dying {
             pose = death_pose(&pose, t, kind, rig.crawl);
         }
         poses.insert(entity, pose);
