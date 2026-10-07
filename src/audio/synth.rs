@@ -725,15 +725,41 @@ pub fn flesh_impact(seed: u32) -> Buf {
     .normalize(0.85)
 }
 
-/// A crisp high-frequency metallic "crit / headshot" ding sound.
-#[allow(dead_code)]
-pub fn crit_ding(seed: u32) -> Buf {
-    skull_pop(seed)
+/// A crisp high-frequency metallic "crit / headshot" ding sound layered with bone snap and gore.
+pub fn headshot_ding(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp_crack = Bp::new();
+    let mut hp_snap = Hp::new();
+    let mut lp_flesh = Lp::new();
+    let mut o_sub = Osc::new();
+    let mut o_bell1 = Osc::new();
+    let mut o_bell2 = Osc::new();
+    let mut o_bell3 = Osc::new();
+
+    render(0.26, |t| {
+        let x = n.next();
+        // 1. Sharp bone fracture transient
+        let crack = bp_crack.run(x, 4800.0, 3.5) * decay(t, 0.003) * 2.5
+            + hp_snap.run(x, 6200.0) * decay(t, 0.002) * 2.0;
+
+        // 2. Fleshy gore squelch
+        let gore = lp_flesh.run(x, 900.0 * decay(t, 0.02) + 200.0) * decay(t, 0.05) * 1.8;
+        let thump = o_sub.sine(75.0 + 35.0 * decay(t, 0.015)) * decay(t, 0.04) * 1.2;
+
+        // 3. Distinct high-frequency metallic reward ding (F#7 / C#8 / F#8 harmonics)
+        let bell1 = o_bell1.sine(2960.0) * decay(t, 0.22) * 1.2;
+        let bell2 = o_bell2.sine(4440.0) * decay(t, 0.14) * 0.7;
+        let bell3 = o_bell3.sine(5920.0) * decay(t, 0.08) * 0.4;
+        let ping = bell1 + bell2 + bell3;
+
+        crack * 1.2 + gore + thump + ping * 1.3
+    })
+    .normalize(0.96)
 }
 
 #[allow(dead_code)]
-pub fn headshot_ding(seed: u32) -> Buf {
-    skull_pop(seed)
+pub fn crit_ding(seed: u32) -> Buf {
+    headshot_ding(seed)
 }
 
 pub fn explosion(seed: u32, size: f32) -> Buf {
@@ -845,6 +871,173 @@ pub fn rumble(len: f32, seed: u32) -> Buf {
     .normalize(0.7)
 }
 
+/// Low-health tension heartbeat: a deep physiological "lub-dub" double thump.
+/// First thump (lub): low sine (56 Hz -> 36 Hz) + muffled chest cavity lowpass noise.
+/// Second thump (dub): slightly lighter (64 Hz -> 42 Hz) spaced ~0.12s later.
+pub fn heartbeat(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut lp_chest = Lp::new();
+    let mut osc1 = Osc::new();
+    let mut osc2 = Osc::new();
+
+    let len = 0.45;
+    render(len, |t| {
+        let x = n.next();
+        // Lub pulse (at t = 0.0)
+        let t1 = t;
+        let lub_pitch = 36.0 + 20.0 * decay(t1, 0.04);
+        let lub_sine = osc1.sine(lub_pitch) * decay(t1, 0.08);
+        let lub_chest = lp_chest.run(x, 110.0) * decay(t1, 0.06) * 0.8;
+        let lub = lub_sine + lub_chest;
+
+        // Dub pulse (at t = 0.12)
+        let t2 = t - 0.12;
+        let dub = if t2 > 0.0 {
+            let dub_pitch = 42.0 + 22.0 * decay(t2, 0.035);
+            let dub_sine = osc2.sine(dub_pitch) * decay(t2, 0.065) * 0.75;
+            let dub_chest = lp_chest.run(x, 130.0) * decay(t2, 0.05) * 0.6;
+            dub_sine + dub_chest
+        } else {
+            0.0
+        };
+
+        lub + dub
+    })
+    .normalize(0.95)
+}
+
+/// Atmospheric eerie wind: slowly sweeping bandpassed noise gust with resonant hollow whistling.
+pub fn ambient_wind(len: f32, seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp1 = Bp::new();
+    let mut bp2 = Bp::new();
+    let mut lp = Lp::new();
+    render(len, |t| {
+        let k = t / len;
+        // Gust envelope (smooth swell and taper)
+        let env_shape = (k * std::f32::consts::PI).sin().powf(1.4);
+        let x = n.next();
+        // Low rumble gust
+        let low = lp.run(x, 220.0 + 80.0 * (t * 2.2).sin()) * 1.2;
+        // Whistling wind through gaps
+        let f_whistle = 450.0 + 220.0 * (t * 1.8 * TAU).sin() + 60.0 * (t * 5.1).sin();
+        let whistle = bp1.run(x, f_whistle, 3.5) * 0.8;
+        // Air turbulence
+        let turbulence = bp2.run(x, 1200.0 + 400.0 * (t * 1.3).sin(), 1.5) * 0.35;
+        (low + whistle + turbulence) * env_shape
+    })
+    .normalize(0.65)
+}
+
+/// Atmospheric ambient drone: unsettling low harmonic drone with slow beat frequency.
+pub fn ambient_drone(len: f32, seed: u32) -> Buf {
+    let mut o1 = Osc::new();
+    let mut o2 = Osc::new();
+    let mut o3 = Osc::new();
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+    render(len, |t| {
+        let k = t / len;
+        let env_shape = (k * std::f32::consts::PI).sin();
+        // Detuned low drone creating eerie 1.2 Hz beating
+        let sub1 = o1.sine(55.0);
+        let sub2 = o2.sine(56.2) * 0.8;
+        // Fifth overtone for ominous mood
+        let overtone = o3.sine(82.4 + 1.5 * (t * 3.0).sin()) * 0.35;
+        // Subtle cold air resonance
+        let cold = bp.run(n.next(), 380.0, 4.0) * 0.25;
+        (sub1 + sub2 + overtone + cold) * env_shape
+    })
+    .normalize(0.60)
+}
+
+/// Ability ready cue: a bright, crystalline rising chime arpeggio signaling cooldown completion.
+pub fn ability_ready(seed: u32) -> Buf {
+    let notes = [
+        (1046.5, 0.00), // C6
+        (1318.5, 0.05), // E6
+        (1568.0, 0.10), // G6
+        (2093.0, 0.15), // C7
+    ];
+    let mut out = Buf(Vec::new());
+    for (f, at) in notes {
+        let chime = bell(
+            &[
+                (f, 1.0, 0.18),
+                (f * 2.0, 0.45, 0.10),
+                (f * 3.01, 0.2, 0.05),
+            ],
+            0.28,
+        );
+        out = out.mix(&chime, at, 0.85);
+    }
+    // Subtle low-mid energy swell
+    let mut o = Osc::new();
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+    let sweep = render(0.24, |t| {
+        let f = 350.0 + 600.0 * (t / 0.24);
+        o.sine(f) * env(t, 0.02, 0.12) * 0.4 + bp.run(n.next(), f * 1.5, 2.5) * decay(t, 0.08) * 0.2
+    });
+    out.mix(&sweep, 0.0, 0.6).normalize(0.85)
+}
+
+/// Round start stinger: dramatic apocalyptic brass/horn swell + heavy sub concussion + dark bells.
+pub fn round_start_stinger(seed: u32) -> Buf {
+    let mut o_saw = Osc::new();
+    let mut lp_brass = Lp::new();
+    let mut n = Noise::new(seed);
+    let mut bp_air = Bp::new();
+
+    // 1. Apocalyptic brass swell
+    let brass = render(1.8, |t| {
+        let cutoff = 120.0 + 650.0 * env(t, 0.35, 0.7);
+        let tone = o_saw.saw(73.4) * 0.8; // D2
+        let air = bp_air.run(n.next(), cutoff * 1.4, 2.0) * 0.3;
+        lp_brass.run(tone + air, cutoff) * env(t, 0.25, 0.9) * 1.6
+    });
+
+    // 2. Heavy sub concussion impact
+    let sub = sub_thump(90.0, 32.0, 0.25, 0.7);
+
+    // 3. Dark ominous church bell / gong partials
+    let bells = bell(
+        &[
+            (110.0, 1.0, 2.2),
+            (165.0, 0.7, 1.8),
+            (220.0, 0.5, 1.4),
+            (330.0, 0.3, 0.9),
+        ],
+        2.5,
+    );
+
+    bells
+        .mix(&brass, 0.05, 0.9)
+        .mix(&sub, 0.0, 1.1)
+        .normalize(0.95)
+}
+
+/// Countdown tone (low pips for 3, 2, 1, high pip for 0 / round start).
+pub fn countdown_beep(high: bool, seed: u32) -> Buf {
+    let mut o = Osc::new();
+    let mut o2 = Osc::new();
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+
+    let (freq, len, tau) = if high {
+        (1760.0, 0.16, 0.09) // A6
+    } else {
+        (880.0, 0.10, 0.05)  // A5
+    };
+
+    render(len, |t| {
+        let tone = o.sine(freq) + o2.sine(freq * 2.0) * 0.25;
+        let click = bp.run(n.next(), freq * 1.5, 4.0) * decay(t, 0.002) * 0.4;
+        (tone + click) * env(t, 0.003, tau)
+    })
+    .normalize(0.8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,6 +1110,13 @@ mod tests {
         ok(&skull_pop(26));
         ok(&kill_sound(27));
         ok(&flesh_impact(28));
+        ok(&heartbeat(29));
+        ok(&ambient_wind(2.0, 30));
+        ok(&ambient_drone(2.0, 31));
+        ok(&ability_ready(32));
+        ok(&round_start_stinger(33));
+        ok(&countdown_beep(false, 34));
+        ok(&countdown_beep(true, 35));
         let w = gunshot(
             &ShotRecipe {
                 body: 140.0,

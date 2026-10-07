@@ -24,7 +24,7 @@ pub struct GraphicsPlugin;
 impl Plugin for GraphicsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DirectionalLightShadowMap { size: 2048 })
-            .add_systems(Update, (apply_camera, apply_sun))
+            .add_systems(Update, (apply_camera, apply_sun, update_camera_mood))
             .add_systems(
                 PostUpdate,
                 follow_sky.before(bevy::transform::TransformSystem::TransformPropagate),
@@ -218,18 +218,89 @@ fn apply_camera(
         } else {
             ec.remove::<Bloom>();
         }
-        // Haze in the distance, the colour of the sky, so far things fade
-        // instead of ending at a hard edge.
+        // Atmospheric distance fog tailored per map and time of day,
+        // with natural exponential-squared falloff and directional light scattering.
         if *app_state.get() == AppState::InGame {
-            let (start, end) = if state.night { (14.0, 70.0) } else { (90.0, 280.0) };
-            ec.insert(DistanceFog {
-                color: clear.0,
-                falloff: FogFalloff::Linear { start, end },
-                ..default()
-            });
+            ec.insert(map_fog(state.map, state.night, clear.0));
         } else {
             ec.remove::<DistanceFog>();
         }
+    }
+}
+
+/// Atmospheric distance fog specifications per map and night condition.
+pub fn map_fog(map: u8, night: bool, clear_color: Color) -> DistanceFog {
+    match (map, night) {
+        // Shipping Yard (Map 0): Maritime sea mist & dockside humidity
+        (0, false) => DistanceFog {
+            color: Color::srgb(0.70, 0.75, 0.82),
+            directional_light_color: Color::srgba(1.0, 0.98, 0.92, 0.5),
+            directional_light_exponent: 18.0,
+            falloff: FogFalloff::from_visibility_squared(85.0),
+        },
+        (0, true) => DistanceFog {
+            color: Color::srgb(0.02, 0.035, 0.06),
+            directional_light_color: Color::srgba(0.2, 0.32, 0.5, 0.7),
+            directional_light_exponent: 12.0,
+            falloff: FogFalloff::from_visibility_squared(44.0),
+        },
+        // Central Park (Map 1): Canopy haze by day, dense cemetery mist by night
+        (1, false) => DistanceFog {
+            color: Color::srgb(0.76, 0.75, 0.68),
+            directional_light_color: Color::srgba(1.1, 1.02, 0.84, 0.55),
+            directional_light_exponent: 14.0,
+            falloff: FogFalloff::from_visibility_squared(105.0),
+        },
+        (1, true) => DistanceFog {
+            color: Color::srgb(0.022, 0.028, 0.05),
+            directional_light_color: Color::srgba(0.22, 0.32, 0.48, 0.75),
+            directional_light_exponent: 10.0,
+            falloff: FogFalloff::from_visibility_squared(38.0),
+        },
+        // The Neighborhood (Map 2): Apocalyptic ash, smoke, and claustrophobic dread
+        (2, false) => DistanceFog {
+            color: Color::srgb(0.74, 0.70, 0.64),
+            directional_light_color: Color::srgba(1.05, 0.85, 0.62, 0.6),
+            directional_light_exponent: 20.0,
+            falloff: FogFalloff::from_visibility_squared(68.0),
+        },
+        (2, true) => DistanceFog {
+            color: Color::srgb(0.016, 0.018, 0.03),
+            directional_light_color: Color::srgba(0.14, 0.16, 0.24, 0.65),
+            directional_light_exponent: 16.0,
+            falloff: FogFalloff::from_visibility_squared(32.0),
+        },
+        _ => DistanceFog {
+            color: clear_color,
+            directional_light_color: Color::NONE,
+            directional_light_exponent: 8.0,
+            falloff: FogFalloff::from_visibility_squared(if night { 40.0 } else { 90.0 }),
+        },
+    }
+}
+
+/// Dynamically adjusts camera color grading mood based on player health state (< 30% HP).
+fn update_camera_mood(
+    app_state: Res<State<AppState>>,
+    state: Res<MatchState>,
+    low_health: Option<Res<crate::feel::LowHealthFx>>,
+    mut grades: Query<&mut ColorGrading, With<Camera3d>>,
+) {
+    if *app_state.get() != AppState::InGame {
+        return;
+    }
+    let (base_temp, base_sat) = map_grade(state.map, state.night);
+    let intensity = low_health.as_ref().map_or(0.0, |h| h.intensity);
+
+    for mut grade in &mut grades {
+        // Desaturate progressively as health drops below 30% (tunnel vision shock)
+        grade.global.post_saturation = base_sat * (1.0 - 0.55 * intensity);
+        // Cool down temperature (cold extremities dread)
+        grade.global.temperature = base_temp - 0.02 * intensity;
+        // Increase midtone contrast (stark claustrophobic shadows)
+        grade.midtones.contrast = 1.06 + 0.18 * intensity;
+        // Drain shadow saturation
+        grade.shadows.saturation = (1.0 - 0.75 * intensity).max(0.1);
     }
 }
 

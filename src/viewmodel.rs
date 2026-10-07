@@ -625,24 +625,74 @@ fn animate(
     pos.y -= anim.sway.y * 0.15 * steady;
     let sw = anim.sway * steady;
     rot *= Quat::from_euler(EulerRot::YXZ, sw.x, sw.y, sw.x * 0.8);
-    // In the air the gun floats up a little.
+    // Airborne floating inertia and landing impact compression
     if !player.on_ground {
-        pos.y += (player.vel.y * -0.002).clamp(-0.01, 0.015);
+        // Floating inertia: weapon lags behind vertical velocity and rolls slightly
+        let vy = player.vel.y;
+        pos.y += (-vy * 0.0035).clamp(-0.024, 0.022);
+        pos.z += (vy.abs() * 0.0015).clamp(0.0, 0.012);
+        rot *= Quat::from_rotation_x((-vy * 0.007).clamp(-0.07, 0.07));
+    } else if player.ground_time < 0.28 && player.last_air > 0.16 {
+        // Landing impact compression & elastic rebound
+        let land_t = player.ground_time / 0.28;
+        let land_strength = (player.last_air / 0.55).clamp(0.2, 1.0);
+        let land_spring = (land_t * PI).sin() * (1.0 - land_t) * land_strength;
+        pos.y -= 0.022 * land_spring;
+        pos.z += 0.010 * land_spring;
+        rot *= Quat::from_rotation_x(0.065 * land_spring);
     }
-    // Sprint: muzzle swings down and in.
+    // Sprint dynamics: weapon swings down and tilts naturally with footstep cadence
     let sp = ease(anim.sprint);
-    pos += Vec3::new(-0.03, -0.045, 0.03) * sp;
-    rot *= Quat::from_euler(EulerRot::YXZ, 0.65 * sp, -0.3 * sp, 0.35 * sp);
-    // Crouch / slide cant.
-    rot *= Quat::from_rotation_z(0.12 * anim.crouch * (1.0 - ads));
-    // Recoil.
+    let sprint_phase = anim.bob * 0.5;
+    let sprint_foot_sway_x = sprint_phase.sin() * 0.016 * sp;
+    let sprint_foot_dip_y = -(sprint_phase * 2.0).cos().abs() * 0.012 * sp;
+    let sprint_foot_cant_z = sprint_phase.sin() * 0.12 * sp;
+    let sprint_foot_pitch_x = (sprint_phase * 2.0).sin() * 0.04 * sp;
+
+    pos += Vec3::new(-0.032 + sprint_foot_sway_x, -0.048 + sprint_foot_dip_y, 0.028) * sp;
+    rot *= Quat::from_euler(
+        EulerRot::YXZ,
+        0.62 * sp + sprint_foot_pitch_x,
+        -0.28 * sp + sprint_foot_sway_x * 3.5,
+        0.34 * sp + sprint_foot_cant_z,
+    );
+
+    // Crouch and slide transition tilt: subtle inertial roll and lowered cant into cover
+    let slide_k = if player.sliding > 0.0 { (player.sliding / 0.65).min(1.0) } else { 0.0 };
+    if slide_k > 0.0 {
+        pos += Vec3::new(-0.022, -0.024, 0.018) * slide_k * (1.0 - ads);
+        rot *= Quat::from_euler(
+            EulerRot::YXZ,
+            -0.07 * slide_k * (1.0 - ads),
+            0.08 * slide_k * (1.0 - ads),
+            -0.24 * slide_k * (1.0 - ads),
+        );
+    }
+    // Regular crouch cant
+    rot *= Quat::from_rotation_z(0.12 * anim.crouch * (1.0 - ads) * (1.0 - slide_k));
+
+    // Recoil: snappy attack impulse and elastic snap-back recovery curve
     let handling = attach.handling(gun);
     let kick = crate::data::recoil(gun).visual;
-    let r = loadout.recoil * (0.5 + 0.5 * handling.recoil_up);
+    let shot_t = anim.since_shot;
+    let punch = if shot_t < 0.032 {
+        (shot_t / 0.032).powf(0.65)
+    } else {
+        let decay_t = shot_t - 0.032;
+        (-16.0 * decay_t).exp() - 0.12 * (-24.0 * decay_t).exp() * (decay_t * 28.0).sin()
+    };
+    let r = (loadout.recoil * 0.55 + punch.max(0.0) * 0.45) * (0.5 + 0.5 * handling.recoil_up);
     let recoil_at = |k: f32| {
+        let h_kick = ((anim.flash_roll * 3.5).sin() * 0.003) * r * kick * k * (1.0 - 0.4 * ads);
+        let roll_kick = ((anim.flash_roll * 2.5).cos() * 0.012) * r * kick * k * (1.0 - 0.5 * ads);
         (
-            Vec3::new(0.0, r * 0.006 * kick * k, r * 0.045 * kick * k * (1.0 - 0.4 * ads)),
-            Quat::from_rotation_x(r * 0.09 * kick * k * (1.0 - 0.6 * ads)),
+            Vec3::new(h_kick, r * 0.007 * kick * k, r * 0.048 * kick * k * (1.0 - 0.4 * ads)),
+            Quat::from_euler(
+                EulerRot::YXZ,
+                h_kick * 2.0,
+                r * 0.095 * kick * k * (1.0 - 0.6 * ads),
+                roll_kick,
+            ),
         )
     };
     // Dual guns fire together; the left one kicks a little out of step.
@@ -654,12 +704,48 @@ fn animate(
     rot *= Quat::from_rotation_x(-(1.0 - e) * 1.0);
     // Left hand off the gun: lower it a touch.
     pos.y -= anim.busy * 0.015;
-    // Reload.
+    // Dry fire tactile feedback: sharp click twitch
+    if loadout.dry_fire > 0.0 {
+        let dry_k = (loadout.dry_fire / 0.14 * PI).sin();
+        pos += Vec3::new(0.0015, -0.004, -0.007) * dry_k;
+        rot *= Quat::from_euler(EulerRot::YXZ, 0.025 * dry_k, -0.01 * dry_k, -0.035 * dry_k);
+    }
+    // Reload: tactile impulses for magazine extraction, insertion slap, and bolt release
+    let mut reload_impulse_pos = Vec3::ZERO;
+    let mut reload_impulse_rot = Quat::IDENTITY;
     let reload = (loadout.reload > 0.0 && loadout.reload_total > 0.0)
         .then(|| 1.0 - loadout.reload / loadout.reload_total);
     let rl = reload
         .map(|p| ramp(p, 0.0, 0.1) * (1.0 - ramp(p, 0.88, 1.0)))
         .unwrap_or(0.0);
+    if let Some(p) = reload {
+        if rig.single_load {
+            let cycles = if gun == 12 { 1.0 } else { 3.0 };
+            if (0.12..0.86).contains(&p) {
+                let u = ((p - 0.12) / 0.74 * cycles).fract();
+                if (0.6..0.9).contains(&u) {
+                    let k = ((u - 0.6) / 0.3 * PI).sin();
+                    reload_impulse_pos += Vec3::new(0.0, 0.005, -0.007) * k;
+                    reload_impulse_rot *= Quat::from_rotation_x(0.025 * k);
+                }
+            }
+        } else {
+            // Magazine insertion slap (around p = 0.58..0.68)
+            if (0.58..0.68).contains(&p) {
+                let slap = ((p - 0.58) / 0.10 * PI).sin();
+                reload_impulse_pos += Vec3::new(0.002, 0.011, -0.005) * slap;
+                reload_impulse_rot *= Quat::from_euler(EulerRot::YXZ, -0.015 * slap, 0.015 * slap, 0.035 * slap);
+            }
+            // Bolt rack / chambering release (around p = 0.86..0.94)
+            if (0.86..0.94).contains(&p) {
+                let bolt = ((p - 0.86) / 0.08 * PI).sin();
+                reload_impulse_pos += Vec3::new(0.0, -0.005, -0.010) * bolt;
+                reload_impulse_rot *= Quat::from_rotation_x(-0.035 * bolt);
+            }
+        }
+    }
+    pos += reload_impulse_pos;
+    rot *= reload_impulse_rot;
     if rig.dual {
         pos.y -= 0.18 * rl;
         rot *= Quat::from_rotation_x(-0.9 * rl);
@@ -810,7 +896,7 @@ fn animate(
                 left_pose = support_pose;
                 blend(mag_tf(0.0), back, ramp(p, 0.82, 0.95))
             };
-            if p >= 0.82 && p < 0.88 {
+            if (0.82..0.88).contains(&p) {
                 left_pose = HandPose::Hold;
             }
         }
@@ -979,15 +1065,23 @@ fn animate(
             Quat::from_euler(EulerRot::YXZ, -0.85, -0.15, -1.5),
         );
         let hand = if k < 0.2 {
-            blend(left_tf, wind, ramp(k, 0.0, 0.2))
+            blend(left_tf, wind, ease(ramp(k, 0.0, 0.2)))
         } else if k < 0.3 {
-            blend(wind, cut, ramp(k, 0.2, 0.3))
-        } else if k < 0.4 {
-            blend(cut, end, ramp(k, 0.3, 0.4))
+            // Snappy whip through slash apex
+            let slash_t = ramp(k, 0.2, 0.3);
+            blend(wind, cut, slash_t.powf(1.4))
+        } else if k < 0.42 {
+            // Extended follow-through
+            blend(cut, end, ramp(k, 0.3, 0.42))
         } else {
-            blend(end, left_tf, ramp(k, 0.5, 0.95))
+            blend(end, left_tf, ramp(k, 0.48, 0.95))
         };
         left_tf = hand;
+        // Impact shudder if knife struck an enemy
+        if loadout.hitmarker > 0.0 && (0.24..0.45).contains(&k) {
+            let shudder = (k * 70.0).sin() * 0.008 * (loadout.hitmarker / 0.15);
+            left_tf.translation += Vec3::new(shudder, -shudder * 0.5, shudder * 0.8);
+        }
         left_pose = HandPose::Hold;
         held = (k < 0.8).then_some(Prop::Knife);
         orb = None;

@@ -61,6 +61,8 @@ pub struct LocalPlayer {
     pub pitch: f32,
     /// Recoil kick added on top of pitch.
     pub kick: f32,
+    /// Camera bank/roll angle (slide tilt, strafe bank).
+    pub roll: f32,
     pub feet: Vec3,
     pub vel: Vec3,
     pub on_ground: bool,
@@ -73,9 +75,9 @@ pub struct LocalPlayer {
     pub dash_time: f32,
     pub dash_dir: Vec3,
     last_spawn_seq: Option<u32>,
-    air_time: f32,
-    ground_time: f32,
-    last_air: f32,
+    pub air_time: f32,
+    pub ground_time: f32,
+    pub last_air: f32,
     /// Time left on a jump press waiting for you to land.
     jump_buffer: f32,
     /// The emote playing: (which, seconds left).
@@ -123,6 +125,7 @@ pub fn spawn_camera(mut commands: Commands) {
             yaw: 0.0,
             pitch: 0.0,
             kick: 0.0,
+            roll: 0.0,
             feet: Vec3::ZERO,
             vel: Vec3::ZERO,
             on_ground: true,
@@ -162,6 +165,7 @@ fn reset_camera(mut player: Single<(&mut Transform, &mut LocalPlayer)>) {
     p.dash_time = 0.0;
     p.air_time = 0.0;
     p.last_air = 0.0;
+    p.roll = 0.0;
     **tf = Transform::from_xyz(0.0, EYE_HEIGHT, 0.0);
 }
 
@@ -179,12 +183,10 @@ fn apply_fov(
             0.0
         };
         let target = (settings.fov + boost).to_radians() * aim.fov_scale();
-        // Zooming in follows the sights straight away; the sprint kick eases.
-        if aim.amount > 0.0 {
-            persp.fov = target;
-        } else {
-            persp.fov += (target - persp.fov) * (1.0 - (-10.0 * time.delta_secs()).exp());
-        }
+        // Smooth exponential FOV transition: fast snappy optical zoom when raising sights,
+        // smooth cinematic ease when lowering or sprinting, with zero pop or hitching.
+        let rate = if aim.amount > 0.0 { 18.0 } else { 12.0 };
+        persp.fov += (target - persp.fov) * (1.0 - (-rate * time.delta_secs()).exp());
     }
 }
 
@@ -221,6 +223,7 @@ fn respawn(
         .unwrap_or(0.0);
     player.vel = Vec3::ZERO;
     player.pitch = 0.0;
+    player.roll = 0.0;
     player.sliding = 0.0;
     // Show the spawn even before the first click to play.
     *tf = Transform::from_translation(player.feet + Vec3::Y * player.eye)
@@ -490,9 +493,25 @@ pub fn movement(
     if p.kick.abs() < 1e-4 {
         p.kick = 0.0;
     }
-    let roll = if p.sliding > 0.0 { 0.06 } else { 0.0 };
+    // Subtle inertial camera roll: bank into slides, lean on ground strafe
+    let slide_roll = if p.sliding > 0.0 {
+        -0.075
+    } else {
+        0.0
+    };
+    let strafe_roll = if p.on_ground {
+        let right_dot = p.vel.dot(right);
+        (-right_dot * 0.0025).clamp(-0.02, 0.02)
+    } else {
+        0.0
+    };
+    let target_roll = slide_roll + strafe_roll;
+    p.roll += (target_roll - p.roll) * (1.0 - (-12.0 * dt).exp());
+    if p.roll.abs() < 1e-5 {
+        p.roll = 0.0;
+    }
     tf.translation = p.eye_pos();
-    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).min(1.5), roll);
+    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).min(1.5), p.roll);
 }
 
 /// Copies our position into the roster so the host (and others) see it.

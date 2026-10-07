@@ -128,6 +128,8 @@ pub struct Loadout {
     /// Underbarrel grenade recharge as we see it (the host checks too).
     pub grenade_cd: f32,
     last_buff_time: f32,
+    /// Tactile twitch timer when pulling the trigger on an empty chamber
+    pub dry_fire: f32,
 }
 
 /// How long a melee swing takes, and when in it the blade connects.
@@ -366,7 +368,7 @@ fn melee(
     mut counter: ResMut<crate::abilities::ActionCounter>,
     mut actions: ResMut<crate::ActionQueue>,
     mut loadout: ResMut<Loadout>,
-    player: Single<(&Transform, &LocalPlayer)>,
+    player: Single<(&Transform, &mut LocalPlayer)>,
     enemies: Query<(&Transform, &Replicated, Option<&crate::EnemyStatus>), With<Enemy>>,
 ) {
     let dt = time.delta_secs();
@@ -377,7 +379,7 @@ fn melee(
         loadout.kill_marker = 0.35;
     }
     loadout.last_kills = kills;
-    let (cam, p) = player.into_inner();
+    let (cam, mut p) = player.into_inner();
     if let Some(t) = loadout.melee.as_mut() {
         *t += dt;
         let t = *t;
@@ -407,6 +409,9 @@ fn melee(
             if reach {
                 loadout.hitmarker = 0.15;
                 loadout.headshot = false;
+                // Melee strike impact: camera punch jolt & knife slash follow-through
+                p.kick -= 0.035;
+                p.roll += 0.015;
             }
         }
         if t >= MELEE_TIME {
@@ -464,6 +469,7 @@ pub fn fire(
     loadout.fire_cd -= dt;
     loadout.grenade_cd = (loadout.grenade_cd - dt).max(0.0);
     loadout.hitmarker -= dt;
+    loadout.dry_fire = (loadout.dry_fire - dt).max(0.0);
     // Exponential smooth decay for visual gun kick
     loadout.recoil *= (-9.5 * dt).exp();
     if loadout.recoil < 0.001 {
@@ -526,6 +532,9 @@ pub fn fire(
     }
     if gun.mag == 0 && !free && alt != Some(AltFire::Grenade) {
         loadout.burst_left = 0;
+        if mouse.just_pressed(MouseButton::Left) {
+            loadout.dry_fire = 0.14;
+        }
         if gun.reserve > 0 {
             let speed = reload_speed(me);
             loadout.reload = def.reload * gun.attach.handling(gun.id).reload / speed;

@@ -47,11 +47,18 @@ pub fn kill(commands: &mut Commands, e: Entity) {
 
 fn start_dying(
     mut commands: Commands,
-    killed: Query<(Entity, Has<Enemy>, Has<Rig>), Added<Killed>>,
+    killed: Query<(Entity, Has<Enemy>, Has<Rig>, Option<&crate::sim::EnemyBrain>), Added<Killed>>,
 ) {
     let mut rng = rand::thread_rng();
-    for (e, enemy, rig) in &killed {
+    for (e, enemy, rig, brain) in &killed {
         if enemy && rig {
+            let is_sprinter = brain.is_some_and(|b| b.is_sprinter);
+            let kind = if is_sprinter && rng.gen_bool(0.65) {
+                // High-momentum sprinters faceplant forward violently
+                1
+            } else {
+                rng.gen_range(0..3)
+            };
             // Out of the game straight away (no more shots, nav, snapshots),
             // but the body stays for its fall.
             commands
@@ -65,7 +72,7 @@ fn start_dying(
                 )>()
                 .insert(Dying {
                     t: 0.0,
-                    kind: rng.gen_range(0..3),
+                    kind,
                 });
         } else {
             commands.entity(e).despawn();
@@ -75,15 +82,26 @@ fn start_dying(
 
 /// Copies the host's status onto the rig so every machine animates the same.
 fn sync_rigs(
-    mut zombies: Query<(&EnemyStatus, &Replicated, &mut Rig), (With<Enemy>, Without<Dying>)>,
+    mut zombies: Query<(
+        &EnemyStatus,
+        &Replicated,
+        &mut Rig,
+        Option<&crate::sim::EnemyBrain>,
+    ), (With<Enemy>, Without<Dying>)>,
 ) {
-    for (status, r, mut rig) in &mut zombies {
+    for (status, r, mut rig, brain) in &mut zombies {
         rig.crawl = status.crawler;
-        // The smash lands when the host's slam does.
-        rig.swing_rate = crate::sim::BRUTE_WINDUP / crate::sim::slam_spec(r.kind).0;
-        if status.attacking && rig.swing > 0.6 {
+        let is_sprinter = brain.is_some_and(|b| b.is_sprinter);
+        let speed_mult = if is_sprinter { 1.45 } else { 1.0 };
+        // The smash lands when the host's slam does (fast sprinters swing with rabid frenzy).
+        rig.swing_rate = (crate::sim::BRUTE_WINDUP / crate::sim::slam_spec(r.kind).0) * speed_mult;
+        if status.attacking && rig.swing > 0.6 / speed_mult {
             rig.swing = 0.0;
-            rig.attack_variant = (rig.attack_variant + 1) % 3;
+            rig.attack_variant = if is_sprinter {
+                if rig.attack_variant == 1 { 2 } else { 1 }
+            } else {
+                (rig.attack_variant + 1) % 3
+            };
         }
         if status.flash > 0.0 {
             rig.flinch = 1.0;

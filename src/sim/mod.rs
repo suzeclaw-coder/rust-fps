@@ -48,6 +48,7 @@ impl Plugin for SimPlugin {
             .init_resource::<powers::Forces>()
             .init_resource::<LastHurt>()
             .init_resource::<Summons>()
+            .init_resource::<SubWavePacer>()
             .add_systems(
                 Update,
                 (
@@ -133,6 +134,12 @@ pub struct EnemyBrain {
     poison_by: Option<u8>,
     /// Hunter's Mark: takes extra damage while above zero.
     marked: f32,
+    /// Fast sprinter variant (1.4x speed, 0.7x HP, faster attack swings).
+    pub is_sprinter: bool,
+    /// Lateral flank offset bias (-0.6..0.6) to spread swarm out.
+    pub flank_bias: f32,
+    /// Attack telegraph windup timer (seconds remaining before a melee bite/strike lands, target_id).
+    pub attack_windup: Option<(f32, u8)>,
 }
 
 /// How a Brute or boss slam lands: windup seconds, radius, how far ahead
@@ -148,6 +155,17 @@ pub fn slam_spec(kind: NetKind) -> (f32, f32, f32, f32) {
 /// Zombies a boss calls in (handled by `rounds`, which can spawn them).
 #[derive(Resource, Default)]
 struct Summons(Vec<(Vec3, NetKind)>);
+
+/// Pacing manager for sub-wave burst spawning and micro-breathers.
+#[derive(Resource, Default)]
+pub struct SubWavePacer {
+    /// How many zombies have been spawned in the current sub-wave burst.
+    pub spawned_in_burst: u32,
+    /// Target burst size before triggering a micro-breather.
+    pub burst_target: u32,
+    /// Active micro-breather cooldown.
+    pub breather_timer: f32,
+}
 
 /// Zombie hits get harder on each map of a run.
 fn stage_damage(state: &MatchState) -> f32 {
@@ -233,12 +251,16 @@ fn clear_sim(
     mut hurt: ResMut<LastHurt>,
     mut zones: ResMut<Zones>,
     mut forces: ResMut<powers::Forces>,
+    mut pacer: ResMut<SubWavePacer>,
 ) {
     zones.0.clear();
     forces.0.clear();
     damage.0.clear();
     strikes.0.clear();
     hurt.0.clear();
+    pacer.spawned_in_burst = 0;
+    pacer.burst_target = 0;
+    pacer.breather_timer = 0.0;
 }
 
 fn hurt_player(p: &mut PlayerInfo, amount: f32, hurt: &mut LastHurt) {
@@ -1286,6 +1308,7 @@ fn rounds(
     mut state: ResMut<MatchState>,
     mut roster: ResMut<Roster>,
     mut summons: ResMut<Summons>,
+    mut pacer: ResMut<SubWavePacer>,
     enemies: Query<&EnemyBrain>,
 ) {
     if state.game_over || state.won || !state.started {
@@ -1303,6 +1326,7 @@ fn rounds(
             pos,
             false,
             1.0,
+            false,
         );
     }
     // The boss health bar.
@@ -1343,6 +1367,13 @@ fn rounds(
             let r = state.round;
             state.to_spawn = 5 + 3 * r + (players - 1) * (2 + r);
             state.spawn_timer = 0.5;
+            pacer.spawned_in_burst = 0;
+            pacer.breather_timer = 0.0;
+            pacer.burst_target = if players == 1 {
+                (3 + (r / 3).min(2)).clamp(3, 5)
+            } else {
+                (4 + players).min(8)
+            };
             if run && state.stage_round > ROUNDS_PER_STAGE {
                 // Boss round: the boss, and zombies trickling in with it.
                 state.to_spawn = 8 + 3 * state.stage as u32 + (players - 1) * 3;
@@ -1360,6 +1391,7 @@ fn rounds(
                     pos,
                     false,
                     toughness,
+                    false,
                 );
             }
             // Downed players get back up at the start of each round.
@@ -1378,20 +1410,48 @@ fn rounds(
     if alive_enemies >= 24 + 4 * players {
         return;
     }
+
+    // Micro-breather countdown between sub-waves
+    if pacer.breather_timer > 0.0 {
+        pacer.breather_timer -= dt;
+        // If the player wipes out all active enemies quickly, end the breather early to resume action
+        if alive_enemies == 0 && pacer.breather_timer > 0.5 {
+            pacer.breather_timer = 0.5;
+        }
+        return;
+    }
+
     state.spawn_timer -= dt;
     if state.spawn_timer > 0.0 {
         return;
     }
     let r = state.round;
     let boss_round = state.boss != 0;
-    state.spawn_timer = if boss_round {
-        (2.6 - 0.2 * state.stage as f32).max(1.2)
+    let mut rng = rand::thread_rng();
+
+    if boss_round {
+        state.spawn_timer = (2.6 - 0.2 * state.stage as f32).max(1.2);
     } else {
-        (1.6 - r as f32 * 0.08).max(0.3)
-    };
+        // Fast burst cadence within sub-wave (0.40s - 0.75s) to group zombies into rushing packs:
+        state.spawn_timer = (0.75 - 0.03 * r as f32).clamp(0.40, 0.75);
+        pacer.spawned_in_burst += 1;
+        if pacer.spawned_in_burst >= pacer.burst_target {
+            // Trigger tactical micro-breather (2.4-3.2s solo, 1.2-1.6s co-op) to allow weapon reloads and retreat
+            pacer.breather_timer = if players == 1 {
+                2.4 + rng.gen_range(0.0..0.8)
+            } else {
+                1.2 + rng.gen_range(0.0..0.4)
+            };
+            pacer.spawned_in_burst = 0;
+            pacer.burst_target = if players == 1 {
+                (3 + (r / 3).min(2)).clamp(3, 5)
+            } else {
+                (4 + players).min(8)
+            };
+        }
+    }
     state.to_spawn -= 1;
 
-    let mut rng = rand::thread_rng();
     let living: Vec<Vec3> = roster
         .0
         .values()
@@ -1417,6 +1477,13 @@ fn rounds(
     } else {
         NetKind::Grunt
     };
+
+    // Fast Sprinter / Runner variant: in mid-to-late rounds (round >= 3),
+    // a portion of regular grunts spawn as aggressive sprinters to break up horde clusters.
+    let is_sprinter = kind == NetKind::Grunt
+        && r >= 3
+        && rng.gen_bool((0.12 + 0.04 * (r - 2) as f64).min(0.40));
+
     spawn_zombie(
         &mut commands,
         &assets,
@@ -1427,6 +1494,7 @@ fn rounds(
         pos,
         false,
         1.0,
+        is_sprinter,
     );
 }
 
@@ -1466,6 +1534,7 @@ fn spawn_zombie(
     pos: Vec3,
     crawler: bool,
     toughness: f32,
+    is_sprinter: bool,
 ) {
     let mut rng = rand::thread_rng();
     let r = state.round.max(1);
@@ -1479,14 +1548,20 @@ fn spawn_zombie(
         NetKind::Brute => (base_hp * 3.0, (2.4 + 0.1 * r as f32).min(4.5)),
         NetKind::Boss(0) => (base_hp * 35.0 * toughness, 3.0),
         NetKind::Boss(_) => (base_hp * 70.0 * toughness, 3.4),
-        _ => (
-            base_hp,
-            (2.8 + 0.25 * r as f32).min(7.0) * rng.gen_range(0.9..1.1),
-        ),
+        _ => {
+            let normal_speed = (2.8 + 0.25 * r as f32).min(7.0) * rng.gen_range(0.9..1.1);
+            if is_sprinter {
+                // Sprinter variant: 0.7x HP, 1.4x movement speed, rabid claw attacks
+                (base_hp * 0.70, (normal_speed * 1.40).clamp(4.2, 9.5))
+            } else {
+                (base_hp, normal_speed)
+            }
+        }
     };
     let id = state.next_net_id;
     state.next_net_id += 1;
     let e = spawn_replicated(commands, assets, rigs, materials, id, kind, pos);
+    let flank_bias = rng.gen_range(-0.55..0.55);
     commands.entity(e).insert(EnemyBrain {
         kind,
         health,
@@ -1509,6 +1584,9 @@ fn spawn_zombie(
         poison_dps: 0.0,
         poison_by: None,
         marked: 0.0,
+        is_sprinter,
+        flank_bias,
+        attack_windup: None,
     });
 }
 
@@ -1540,6 +1618,7 @@ fn sandbox(
                 let at = Vec3::from_array(at);
                 let fwd = Vec3::from_array(dir).with_y(0.0).normalize_or(Vec3::NEG_Z);
                 let side = Vec3::new(-fwd.z, 0.0, fwd.x);
+                let is_sprinter = kind == 6;
                 let net = match kind {
                     1 => NetKind::Shooter,
                     2 => NetKind::Brute,
@@ -1561,6 +1640,7 @@ fn sandbox(
                         pos,
                         kind == 3,
                         1.0,
+                        is_sprinter,
                     );
                 }
             }
@@ -1637,14 +1717,28 @@ fn enemy_ai(
         } else {
             nav.direction(pos).unwrap_or(direct)
         };
+
+        // Lateral approach spread: compute perpendicular tangent in XZ plane
+        // to fan zombies out around the target and prevent single-file conga lines
+        let tangent = Vec3::new(-direct.z, 0.0, direct.x);
+        let flank_weight = if sees {
+            ((22.0 - dist) / 18.0).clamp(0.10, 0.55)
+        } else {
+            0.08
+        };
+        let steer = (path + tangent * (enemy.flank_bias * flank_weight)).normalize_or_zero();
+
         // The final boss gets faster when it's nearly dead.
         let enraged = enemy.kind == NetKind::Boss(1) && enemy.health < enemy.max_health * 0.3;
         // Apply brief speed dampening / momentary stagger when flinching from heavy/critical shots
         let flinch_factor = if enemy.flinch > 0.0 { 0.25 } else { 1.0 };
+        // Slow down slightly while committed to winding up an attack
+        let windup_factor = if enemy.attack_windup.is_some() { 0.35 } else { 1.0 };
         let speed = enemy.speed
             * if enemy.slow > 0.0 { 0.5 } else { 1.0 }
             * if enraged { 1.4 } else { 1.0 }
-            * flinch_factor;
+            * flinch_factor
+            * windup_factor;
         let (windup, slam_radius, slam_ahead, slam_damage) = slam_spec(enemy.kind);
         let desired = match enemy.kind {
             NetKind::Shooter if sees => 12.0,
@@ -1653,7 +1747,7 @@ fn enemy_ai(
             _ => 1.1,
         };
         if dist > desired {
-            velocity = path * speed;
+            velocity = steer * speed;
         } else if enemy.kind == NetKind::Shooter && dist < desired - 4.0 {
             velocity = -direct * speed * 0.6;
         }
@@ -1683,8 +1777,12 @@ fn enemy_ai(
             }
             let away = (pos - *opos).with_y(0.0);
             let d = away.length();
-            if d < 1.1 && d > 1e-3 {
-                velocity += away / d * (1.1 - d) * 5.0;
+            let sep_radius = 1.35 * scale;
+            if d < sep_radius && d > 1e-3 {
+                let overlap = (sep_radius - d) / sep_radius;
+                let repulse = away / d;
+                let perp = Vec3::new(-repulse.z, 0.0, repulse.x) * enemy.flank_bias.signum();
+                velocity += (repulse * 5.5 + perp * 2.0) * overlap;
             }
         }
         let mut new_pos = pos + velocity * dt;
@@ -1706,9 +1804,32 @@ fn enemy_ai(
 
         enemy.attack_timer -= dt;
         enemy.swing += dt;
-        if enemy.stun > 0.0 {
+        if enemy.stun > 0.0 || enemy.flinch > 0.0 {
             enemy.slam = false;
+            enemy.attack_windup = None;
             continue;
+        }
+
+        // Resolve active attack windup / telegraph for melee bites/claws
+        if let Some((ref mut timer, tid)) = enemy.attack_windup {
+            *timer -= dt;
+            if *timer <= 0.0 {
+                enemy.attack_windup = None;
+                if let Some(p) = roster.0.get_mut(&tid) {
+                    let reach = match enemy.kind {
+                        NetKind::Brute => 2.1,
+                        NetKind::Boss(_) => slam_ahead + slam_radius * 0.6,
+                        _ => 1.6,
+                    };
+                    let p_dist = (p.feet() - new_pos).with_y(0.0).length();
+                    // Reaction / dodge window: if player slid, dashed, or sprinted out of range (+0.35m margin), attack whiffs!
+                    if p.alive && p_dist <= reach + 0.35 {
+                        let hits = stage_damage(&state);
+                        let dmg = if enemy.is_sprinter { 12.0 } else { 15.0 };
+                        hurt_player(p, dmg * hits, &mut hurt);
+                    }
+                }
+            }
         }
         let hits = stage_damage(&state);
         if enemy.slam && enemy.swing >= windup {
@@ -1817,17 +1938,23 @@ fn enemy_ai(
                     NetKind::Boss(_) => slam_ahead + slam_radius * 0.6,
                     _ => 1.6,
                 };
-                if dist < reach && enemy.attack_timer <= 0.0 {
+                if dist < reach && enemy.attack_timer <= 0.0 && enemy.attack_windup.is_none() {
                     enemy.swing = 0.0;
                     if kind.slams() {
                         // Winds up first; the slam lands above.
                         enemy.attack_timer = if kind.is_boss() { 1.1 } else { 1.4 } + windup;
                         enemy.slam = true;
                     } else {
-                        enemy.attack_timer = 0.9;
-                        if let Some(p) = roster.0.get_mut(&target_id) {
-                            hurt_player(p, 15.0 * hits, &mut hurt);
-                        }
+                        // Telegraph windup window: 0.18s for fast sprinters, 0.26s for grunts, 0.30s for crawlers
+                        let windup_time = if enemy.crawler {
+                            0.30
+                        } else if enemy.is_sprinter {
+                            0.18
+                        } else {
+                            0.26
+                        };
+                        enemy.attack_windup = Some((windup_time, target_id));
+                        enemy.attack_timer = if enemy.is_sprinter { 0.75 } else { 0.95 };
                     }
                 }
             }

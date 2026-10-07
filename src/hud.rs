@@ -55,6 +55,7 @@ enum HudText {
     Level,
     Perks,
     Points,
+    PointsDelta,
     Gun,
     Ammo,
     OtherGun,
@@ -186,17 +187,22 @@ fn update_sights(
     aim: Res<crate::weapons::Aim>,
     loadout: Res<crate::weapons::Loadout>,
     player: Single<&crate::player::LocalPlayer>,
-    mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility), Without<ScopeOverlay>>,
+    mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility, &mut BackgroundColor), Without<ScopeOverlay>>,
     mut scope: Query<&mut Visibility, (With<ScopeOverlay>, Without<CrosshairLine>)>,
     mut bloom_smooth: Local<f32>,
 ) {
-    let hide = aim.amount > 0.4 || player.third_person();
-    for (_, _, mut v) in &mut lines {
+    // Smoothly fade out crosshair as sights come up; completely hidden by 35% ADS
+    let ads_fade = (1.0 - (aim.amount / 0.35).min(1.0)).powi(2);
+    let hide = ads_fade <= 0.002 || player.third_person();
+    for (_, _, mut v, mut bg) in &mut lines {
         *v = if hide {
             Visibility::Hidden
         } else {
             Visibility::Inherited
         };
+        if !hide {
+            bg.0 = Color::srgba(1.0, 1.0, 1.0, 0.85 * ads_fade);
+        }
     }
     for mut v in &mut scope {
         *v = if aim.scoped {
@@ -232,7 +238,7 @@ fn update_sights(
 
     let offset = 9.0 * 2.0 + *bloom_smooth * 12.0;
 
-    for (CrosshairLine(dir), mut node, _) in &mut lines {
+    for (CrosshairLine(dir), mut node, _, _) in &mut lines {
         match dir {
             CrosshairLineDir::Top => {
                 node.margin.left = Val::Px(0.0);
@@ -604,7 +610,19 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
         ))
         .with_children(|c| {
-            c.spawn((HudText::Points, text("", 36.0, Color::srgb(1.0, 0.85, 0.3))));
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Baseline,
+                column_gap: Val::Px(8.0),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    HudText::PointsDelta,
+                    text("", 20.0, Color::srgba(1.0, 0.92, 0.35, 0.0)),
+                ));
+                r.spawn((HudText::Points, text("", 36.0, Color::srgb(1.0, 0.85, 0.3))));
+            });
             c.spawn((HudText::OtherGun, text("", 18.0, dim)));
             c.spawn((HudText::Gun, text("", 22.0, white)));
             c.spawn((HudText::Ammo, text("", 42.0, white)));
@@ -634,7 +652,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 BorderRadius::all(Val::Px(8.0)),
             ))
             .with_children(|p| {
-                p.spawn((ScoreboardText, text("", 19.0, white)));
+                p.spawn((ScoreboardText, text("", 16.0, white)));
             });
         });
 }
@@ -675,6 +693,26 @@ fn set(text: &mut Text, value: String) {
     }
 }
 
+fn set_color(tc: &mut TextColor, color: Color) {
+    if tc.0 != color {
+        tc.0 = color;
+    }
+}
+
+#[derive(Default)]
+struct HudAnimState {
+    last_health: f32,
+    flash: f32,
+    bar_flash: f32,
+    last_points: u32,
+    points_flash: f32,
+    points_gain: i32,
+    last_level: u32,
+    level_flash: f32,
+    ready_prev: [bool; 5],
+    ready_flash: [f32; 5],
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_hud(
     time: Res<Time>,
@@ -684,12 +722,20 @@ fn update_hud(
     loadout: Res<Loadout>,
     settings: Res<Settings>,
     enemies: Query<(), With<Enemy>>,
-    mut texts: Query<(&HudText, &mut Text)>,
-    mut fills: Query<(&HudFill, &mut Node, &mut BackgroundColor)>,
-    mut ability_box: Query<(&AbilityBox, &mut BorderColor)>,
-    mut hurt: Single<&mut BackgroundColor, (With<HurtFlash>, Without<HudFill>)>,
-    mut last_health: Local<f32>,
-    mut flash: Local<f32>,
+    mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
+    mut fills: Query<
+        (&HudFill, &mut Node, &mut BackgroundColor),
+        (With<HudFill>, Without<AbilityBox>, Without<HurtFlash>),
+    >,
+    mut ability_box: Query<
+        (&AbilityBox, &mut BorderColor, &mut BackgroundColor),
+        (With<AbilityBox>, Without<HudFill>, Without<HurtFlash>),
+    >,
+    mut hurt: Single<
+        &mut BackgroundColor,
+        (With<HurtFlash>, Without<HudFill>, Without<AbilityBox>),
+    >,
+    mut anim: Local<HudAnimState>,
 ) {
     let Some(me) = roster.me(&session) else {
         return;
@@ -713,14 +759,61 @@ fn update_hud(
     // The weapon ability running right now (box index).
     let running = |i: usize| i >= 3 && me.buff_time > 0.0 && me.buff == Some(weapon[i - 3]);
 
-    for (kind, mut t) in &mut texts {
-        let value = match *kind {
+    let white = Color::WHITE;
+    let dim = Color::srgb(0.75, 0.78, 0.85);
+
+    // Track level changes for XP shimmer/flash
+    if anim.last_level == 0 && me.level > 0 {
+        anim.last_level = me.level;
+    } else if me.level > anim.last_level {
+        anim.level_flash = 1.6;
+        anim.last_level = me.level;
+    } else if me.level < anim.last_level {
+        anim.last_level = me.level;
+    }
+    if anim.level_flash > 0.0 {
+        anim.level_flash = (anim.level_flash - time.delta_secs()).max(0.0);
+    }
+
+    // Track points changes for gold flash and delta popup
+    if anim.last_points == 0 && me.points > 0 {
+        anim.last_points = me.points;
+    } else if me.points > anim.last_points {
+        let diff = (me.points - anim.last_points) as i32;
+        anim.points_gain += diff;
+        anim.points_flash = 0.65;
+        anim.last_points = me.points;
+    } else if me.points < anim.last_points {
+        anim.last_points = me.points;
+    }
+    if anim.points_flash > 0.0 {
+        anim.points_flash = (anim.points_flash - time.delta_secs()).max(0.0);
+        if anim.points_flash <= 0.0 {
+            anim.points_gain = 0;
+        }
+    }
+
+    // Track ability readiness transitions for border glow
+    for i in 0..5 {
+        let is_ready = ready(i);
+        if is_ready && !anim.ready_prev[i] {
+            anim.ready_flash[i] = 0.75;
+        }
+        anim.ready_prev[i] = is_ready;
+        if anim.ready_flash[i] > 0.0 {
+            anim.ready_flash[i] = (anim.ready_flash[i] - time.delta_secs()).max(0.0);
+        }
+    }
+
+    for (kind, mut t, mut tc) in &mut texts {
+        let (value, col) = match *kind {
             HudText::Round => {
-                if state.round == 0 {
+                let v = if state.round == 0 {
                     String::new()
                 } else {
                     format!("{}", state.round)
-                }
+                };
+                (v, Color::srgb(0.85, 0.12, 0.1))
             }
             HudText::Info => {
                 let mut info = map_name(state.map).to_string();
@@ -729,7 +822,7 @@ fn update_hud(
                     if state.teleport {
                         info += &format!("\nBoss down: on to map {}", state.stage + 2);
                     } else if state.stage_round > ROUNDS_PER_STAGE {
-                        info += "\nBOSS ROUND";
+                        info += "\n☠ BOSS ROUND ☠";
                     } else if state.stage_round > 0 {
                         info += &format!(
                             "\nRound {} of {}, then the boss",
@@ -741,32 +834,54 @@ fn update_hud(
                     info += &format!("\nEnemies left: {}", enemy_count + state.to_spawn);
                 }
                 if state.insta_kill > 0.0 {
-                    info += &format!("\nINSTA KILL {:.0}s", state.insta_kill);
+                    info += &format!("\n⚡ INSTA-KILL: {:.0}s", state.insta_kill);
                 }
                 if state.double_points > 0.0 {
-                    info += &format!("\nDOUBLE POINTS {:.0}s", state.double_points);
+                    info += &format!("\n💰 DOUBLE POINTS: {:.0}s", state.double_points);
                 }
                 if me.chain > 0.0 {
-                    info += &format!("\nCHAIN REACTION {:.0}s", me.chain);
+                    info += &format!("\n🔗 CHAIN REACTION: {:.0}s", me.chain);
                 }
                 if me.guard > 0.0 {
-                    info += &format!("\nGUARD {:.0}% {:.0}s", me.guard_cut * 100.0, me.guard);
+                    info += &format!("\n🛡 GUARD {:.0}%: {:.0}s", me.guard_cut * 100.0, me.guard);
                 }
                 if !session.status.is_empty() && session.role == crate::Role::Host {
                     info += &format!("\n{}", session.status);
                 }
-                info
+                (info, dim)
             }
-            HudText::Health => format!("{}  {:.0} / {:.0}", me.name, me.health.max(0.0), max),
-            HudText::Level => {
-                if me.level >= MAX_LEVEL {
-                    format!("Level {} (max)", me.level)
+            HudText::Health => {
+                let pct = (me.health / max).clamp(0.0, 1.0);
+                let v = format!("{}  {:.0} / {:.0}", me.name, me.health.max(0.0), max);
+                let c = if anim.bar_flash > 0.0 {
+                    Color::srgb(1.0, 0.95, 0.95)
+                } else if pct > 0.6 {
+                    white
+                } else if pct >= 0.3 {
+                    Color::srgb(1.0, 0.75, 0.3)
                 } else {
-                    format!(
-                        "Level {}  -  {} / {} XP",
-                        me.level,
-                        me.xp,
-                        xp_to_next(me.level)
+                    let pulse = (time.elapsed_secs() * 8.0).sin() * 0.5 + 0.5;
+                    Color::srgb(1.0, 0.2 + 0.2 * pulse, 0.2 + 0.2 * pulse)
+                };
+                (v, c)
+            }
+            HudText::Level => {
+                if anim.level_flash > 0.0 {
+                    (
+                        format!("★ LEVEL UP! LEVEL {} ★", me.level),
+                        Color::srgb(1.0, 0.90, 0.3),
+                    )
+                } else if me.level >= MAX_LEVEL {
+                    (format!("Level {} (max)", me.level), dim)
+                } else {
+                    (
+                        format!(
+                            "Level {}  -  {} / {} XP",
+                            me.level,
+                            me.xp,
+                            xp_to_next(me.level)
+                        ),
+                        dim,
                     )
                 }
             }
@@ -788,107 +903,197 @@ fn update_hud(
                 if !abil.is_empty() {
                     lines.push(format!("Ability elements: {}", abil.join(", ")));
                 }
-                lines.join("\n")
+                (lines.join("\n"), white)
             }
-            HudText::Points => format!("{} pts", me.points),
-            HudText::Gun => loadout
-                .current()
-                .map(|g| {
-                    let parts = g.attach.names();
-                    let extra = if parts.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n{}", parts.join(" + "))
-                    };
-                    let alt = alt_fire(g.id);
-                    let alt_line = match alt {
-                        AltFire::Grenade => {
-                            let cd = loadout.grenade_cd.max(me.grenade_cd);
-                            if cd > 0.0 {
-                                format!("\n[RMB] {} ({cd:.1}s)", alt.describe())
-                            } else {
-                                format!("\n[RMB] {} (ready)", alt.describe())
+            HudText::Points => {
+                let v = format!("{} pts", me.points);
+                let c = if anim.points_flash > 0.0 {
+                    let t = (anim.points_flash / 0.65).clamp(0.0, 1.0);
+                    Color::srgb(1.0, 0.85, 0.3).mix(&Color::srgb(1.0, 1.0, 0.9), t)
+                } else {
+                    Color::srgb(1.0, 0.85, 0.3)
+                };
+                (v, c)
+            }
+            HudText::PointsDelta => {
+                if anim.points_flash > 0.0 && anim.points_gain > 0 {
+                    let t = (anim.points_flash / 0.65).clamp(0.0, 1.0);
+                    (
+                        format!("+{}", anim.points_gain),
+                        Color::srgba(1.0, 0.92, 0.35, t.powf(0.5)),
+                    )
+                } else {
+                    (String::new(), Color::srgba(0.0, 0.0, 0.0, 0.0))
+                }
+            }
+            HudText::Gun => {
+                let v = loadout
+                    .current()
+                    .map(|g| {
+                        let parts = g.attach.names();
+                        let extra = if parts.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{}", parts.join(" + "))
+                        };
+                        let alt = alt_fire(g.id);
+                        let alt_line = match alt {
+                            AltFire::Grenade => {
+                                let cd = loadout.grenade_cd.max(me.grenade_cd);
+                                if cd > 0.0 {
+                                    format!("\n[RMB] {} ({cd:.1}s)", alt.describe())
+                                } else {
+                                    format!("\n[RMB] {} (ready)", alt.describe())
+                                }
                             }
-                        }
-                        a => format!("\n[RMB] {}", a.describe()),
-                    };
-                    format!(
-                        "{}{}  ({}){extra}{alt_line}",
-                        gun_def(g.id).name,
-                        tier_name(g.tier),
-                        skin_def(me.skin_for(g.id)).name
-                    )
-                })
-                .unwrap_or_default(),
-            HudText::Ammo => match loadout.current() {
-                Some(_) if me.gun_buff().free_ammo => "INFINITE".to_string(),
-                Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
-                Some(g) => format!("{} / {}", g.mag, g.reserve),
-                None => String::new(),
-            },
-            HudText::OtherGun => loadout.slots[1 - loadout.active]
-                .map(|g| {
-                    format!(
-                        "[{}] {}",
-                        key_name(settings.key(Action::SwapWeapon)),
-                        gun_def(g.id).name
-                    )
-                })
-                .unwrap_or_default(),
+                            a => format!("\n[RMB] {}", a.describe()),
+                        };
+                        format!(
+                            "{}{}  ({}){extra}{alt_line}",
+                            gun_def(g.id).name,
+                            tier_name(g.tier),
+                            skin_def(me.skin_for(g.id)).name
+                        )
+                    })
+                    .unwrap_or_default();
+                (v, white)
+            }
+            HudText::Ammo => {
+                let v = match loadout.current() {
+                    Some(_) if me.gun_buff().free_ammo => "INFINITE".to_string(),
+                    Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
+                    Some(g) => format!("{} / {}", g.mag, g.reserve),
+                    None => String::new(),
+                };
+                let c = match loadout.current() {
+                    Some(_) if me.gun_buff().free_ammo => Color::srgb(0.3, 0.9, 1.0),
+                    Some(g) if g.mag <= 3 => Color::srgb(1.0, 0.3, 0.25),
+                    _ => white,
+                };
+                (v, c)
+            }
+            HudText::OtherGun => {
+                let v = loadout.slots[1 - loadout.active]
+                    .map(|g| {
+                        format!(
+                            "[{}] {}",
+                            key_name(settings.key(Action::SwapWeapon)),
+                            gun_def(g.id).name
+                        )
+                    })
+                    .unwrap_or_default();
+                (v, dim)
+            }
             HudText::Ability(i) if i >= 3 => {
                 let w = weapon[i - 3];
-                let status = if running(i) {
-                    format!("ACTIVE {:.1}s", me.buff_time)
+                let (status, col) = if running(i) {
+                    (
+                        format!("ACTIVE {:.1}s", me.buff_time),
+                        Color::srgb(1.0, 0.95, 0.35),
+                    )
                 } else if ready(i) {
-                    "READY".to_string()
+                    ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
                 } else {
-                    format!("{:.1}s", me.weapon_cd[i - 3])
+                    (
+                        format!("{:.1}s", me.weapon_cd[i - 3]),
+                        Color::srgb(0.75, 0.78, 0.85),
+                    )
                 };
-                format!("{}\n[{}] {}", w.name(), key_name(settings.key(keys[i])), status)
+                (
+                    format!("{}\n[{}] {}", w.name(), key_name(settings.key(keys[i])), status),
+                    col,
+                )
             }
             HudText::Ability(i) => {
-                let status = if i == 2 {
+                let (status, col) = if i == 2 {
                     if ready(2) {
-                        "READY".to_string()
+                        ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
                     } else {
-                        format!("{:.0}%", me.ult_charge)
+                        (
+                            format!("{:.0}%", me.ult_charge),
+                            Color::srgb(0.75, 0.78, 0.85),
+                        )
                     }
                 } else if me.max_charges(i) > 1 {
                     let mut t = format!("{}/{}", me.charges[i], me.max_charges(i));
                     if me.cooldowns[i] > 0.0 {
                         t += &format!("  {:.1}s", me.cooldowns[i]);
                     }
-                    t
+                    let c = if ready(i) {
+                        Color::srgb(0.9, 1.0, 0.95)
+                    } else {
+                        Color::srgb(0.75, 0.78, 0.85)
+                    };
+                    (t, c)
                 } else if ready(i) {
-                    "READY".to_string()
+                    ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
                 } else {
-                    format!("{:.1}s", me.cooldowns[i])
+                    (
+                        format!("{:.1}s", me.cooldowns[i]),
+                        Color::srgb(0.75, 0.78, 0.85),
+                    )
                 };
                 let roman = ["I", "II", "III", "IV", "V", "VI"][(me.tiers[i] as usize).min(5)];
                 let copies = me.copies(i);
                 let many = if copies > 1 { format!(" x{copies}") } else { String::new() };
-                format!(
-                    "{} {roman}\n[{}] {}{many}",
-                    abilities[i].name(),
-                    key_name(settings.key(keys[i])),
-                    status
+                (
+                    format!(
+                        "{} {roman}\n[{}] {}{many}",
+                        abilities[i].name(),
+                        key_name(settings.key(keys[i])),
+                        status
+                    ),
+                    col,
                 )
             }
         };
         set(&mut t, value);
+        set_color(&mut tc, col);
     }
 
     for (kind, mut node, mut bg) in &mut fills {
         match *kind {
             HudFill::Health => {
-                node.width = Val::Percent((me.health / max * 100.0).clamp(0.0, 100.0));
+                let pct = (me.health / max).clamp(0.0, 1.0);
+                node.width = Val::Percent(pct * 100.0);
+
+                let emerald = Color::srgb(0.20, 0.85, 0.38);
+                let amber = Color::srgb(0.95, 0.65, 0.15);
+                let crimson_base = Color::srgb(0.95, 0.12, 0.12);
+                let crimson_dark = Color::srgb(0.55, 0.06, 0.06);
+
+                let mut col = if pct > 0.6 {
+                    let t = (pct - 0.6) / 0.4;
+                    amber.mix(&emerald, t)
+                } else if pct >= 0.3 {
+                    let t = (pct - 0.3) / 0.3;
+                    crimson_base.mix(&amber, t)
+                } else {
+                    let pulse = (time.elapsed_secs() * 8.0).sin() * 0.5 + 0.5;
+                    crimson_dark.mix(&crimson_base, pulse)
+                };
+
+                if anim.bar_flash > 0.0 {
+                    let flash_t = (anim.bar_flash / 0.30).clamp(0.0, 1.0);
+                    col = col.mix(&Color::srgb(1.0, 0.95, 0.95), flash_t * 0.75);
+                }
+                bg.0 = col;
             }
             HudFill::Xp => {
-                node.width = Val::Percent(if me.level >= MAX_LEVEL {
+                let pct = if me.level >= MAX_LEVEL {
                     100.0
                 } else {
                     (me.xp as f32 / xp_to_next(me.level) as f32 * 100.0).clamp(0.0, 100.0)
-                });
+                };
+                node.width = Val::Percent(pct);
+                if anim.level_flash > 0.0 {
+                    let shimmer = (time.elapsed_secs() * 14.0).sin() * 0.5 + 0.5;
+                    let gold = Color::srgb(1.0, 0.85, 0.2);
+                    let white = Color::srgb(1.0, 1.0, 0.95);
+                    bg.0 = gold.mix(&white, shimmer);
+                } else {
+                    bg.0 = Color::srgb(0.32, 0.65, 1.0);
+                }
             }
             HudFill::Ability(i) if i >= 3 => {
                 let w = weapon[i - 3];
@@ -899,11 +1104,11 @@ fn update_hud(
                 };
                 node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
                 bg.0 = if running(i) {
-                    w.color().with_alpha(0.45)
+                    w.color().with_alpha(0.55)
                 } else if ready(i) {
-                    Color::srgba(0.3, 0.9, 0.5, 0.35)
+                    Color::srgba(0.2, 0.9, 0.45, 0.30)
                 } else {
-                    Color::srgba(1.0, 0.6, 0.25, 0.3)
+                    Color::srgba(1.0, 0.6, 0.25, 0.30)
                 };
             }
             HudFill::Ability(i) => {
@@ -918,30 +1123,52 @@ fn update_hud(
                 };
                 node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
                 bg.0 = if ready(i) {
-                    Color::srgba(0.3, 0.9, 0.5, 0.35)
+                    Color::srgba(0.2, 0.9, 0.45, 0.30)
                 } else {
-                    Color::srgba(0.3, 0.6, 1.0, 0.3)
+                    Color::srgba(0.25, 0.55, 0.9, 0.30)
                 };
             }
         }
     }
-    for (AbilityBox(i), mut border) in &mut ability_box {
-        border.0 = if running(*i) {
-            weapon[*i - 3].color()
-        } else if ready(*i) {
-            Color::srgba(0.4, 1.0, 0.6, 0.8)
+
+    for (AbilityBox(i), mut border, mut box_bg) in &mut ability_box {
+        let is_running = running(*i);
+        let is_ready = ready(*i);
+        if is_running {
+            let pulse = (time.elapsed_secs() * 9.0).sin() * 0.5 + 0.5;
+            let base_col = weapon[*i - 3].color();
+            border.0 = base_col.mix(&Color::WHITE, pulse * 0.35);
+            box_bg.0 = Color::srgba(0.08, 0.12, 0.20, 0.90);
+        } else if is_ready {
+            let flash_t = (anim.ready_flash[*i] / 0.75).clamp(0.0, 1.0);
+            if flash_t > 0.0 {
+                let glow = Color::srgb(0.35, 1.0, 0.65).mix(&Color::WHITE, flash_t);
+                let srgba = glow.to_srgba();
+                border.0 = Color::srgba(srgba.red, srgba.green, srgba.blue, 0.95);
+                box_bg.0 = Color::srgba(0.06, 0.14, 0.10, 0.90);
+            } else {
+                let breathe = (time.elapsed_secs() * 3.0).sin() * 0.5 + 0.5;
+                border.0 = Color::srgba(0.3, 0.95, 0.55, 0.75 + 0.20 * breathe);
+                box_bg.0 = Color::srgba(0.04, 0.08, 0.06, 0.80);
+            }
         } else {
-            Color::srgba(1.0, 1.0, 1.0, 0.25)
-        };
+            border.0 = Color::srgba(0.35, 0.40, 0.50, 0.35);
+            box_bg.0 = Color::srgba(0.03, 0.04, 0.06, 0.85);
+        }
     }
 
-    if me.health < *last_health - 0.5 {
-        *flash = 0.35;
+    if anim.last_health == 0.0 && me.health > 0.0 {
+        anim.last_health = me.health;
     }
-    *last_health = me.health;
-    *flash = (*flash - time.delta_secs()).max(0.0);
+    if me.health < anim.last_health - 0.5 {
+        anim.flash = 0.35;
+        anim.bar_flash = 0.30;
+    }
+    anim.last_health = me.health;
+    anim.flash = (anim.flash - time.delta_secs()).max(0.0);
+    anim.bar_flash = (anim.bar_flash - time.delta_secs()).max(0.0);
     let downed = if me.alive { 0.0 } else { 0.25 };
-    hurt.0 = Color::srgba(0.8, 0.0, 0.0, (*flash).max(downed));
+    hurt.0 = Color::srgba(0.8, 0.0, 0.0, anim.flash.max(downed));
 }
 
 /// CoD Zombies Hitmarker:
@@ -1177,15 +1404,30 @@ fn update_banner(
     banner: Single<(&mut Text, &mut TextColor), With<BannerText>>,
     mut last_seq: Local<Option<u32>>,
     mut show: Local<f32>,
+    mut last_round: Local<u32>,
+    mut round_banner: Local<f32>,
 ) {
     let (mut text, mut color) = banner.into_inner();
     if *last_seq != Some(state.powerup_seq) {
         if last_seq.is_some() && state.last_powerup.is_some() {
-            *show = 2.5;
+            *show = 2.8;
         }
         *last_seq = Some(state.powerup_seq);
     }
     *show -= time.delta_secs();
+
+    // Round banner tracking
+    if *last_round == 0 && state.round > 0 {
+        *last_round = state.round;
+    } else if state.round > *last_round {
+        *round_banner = 2.8;
+        *last_round = state.round;
+    } else if state.round < *last_round {
+        *last_round = state.round;
+    }
+    if *round_banner > 0.0 {
+        *round_banner = (*round_banner - time.delta_secs()).max(0.0);
+    }
 
     if match_ended(&state) {
         set(&mut text, String::new());
@@ -1193,7 +1435,10 @@ fn update_banner(
     }
     if *show > 0.0 {
         if let Some(p) = state.last_powerup {
-            set(&mut text, format!("{}!", p.name().to_uppercase()));
+            set(
+                &mut text,
+                format!("★ {} ★\n{}", p.name().to_uppercase(), p.description()),
+            );
             color.0 = p.color();
             return;
         }
@@ -1243,18 +1488,30 @@ fn update_banner(
             set(
                 &mut text,
                 format!(
-                    "Round {} cleared!\n{} is coming... {:.0}",
+                    "ROUND {} CLEARED!\n⚠️ {} INCOMING: {:.0}s",
                     state.round,
                     name,
                     state.intermission.ceil()
                 ),
             );
-            color.0 = Color::srgb(1.0, 0.45, 0.3);
+            color.0 = Color::srgb(1.0, 0.45, 0.25);
         } else if state.intermission < 4.5 {
-            set(&mut text, format!("Round {} cleared!", state.round));
-            color.0 = ACCENT;
+            set(&mut text, format!("ROUND {} CLEARED!", state.round));
+            color.0 = Color::srgb(0.3, 0.95, 0.5);
         } else {
             set(&mut text, String::new());
+        }
+        return;
+    }
+    if *round_banner > 0.0 && state.intermission <= 0.0 {
+        let boss_round = !state.sandbox.on && state.stage_round > ROUNDS_PER_STAGE;
+        if boss_round {
+            let name = boss_name(state.map, state.stage + 1 >= STAGES);
+            set(&mut text, format!("☠ BOSS ROUND ☠\n{}", name.to_uppercase()));
+            color.0 = Color::srgb(1.0, 0.2, 0.18);
+        } else {
+            set(&mut text, format!("— ROUND {} —", state.round));
+            color.0 = Color::srgb(0.95, 0.22, 0.15);
         }
         return;
     }
@@ -1266,6 +1523,7 @@ fn update_scoreboard(
     settings: Res<Settings>,
     state: Res<MatchState>,
     roster: Res<Roster>,
+    session: Res<Session>,
     mut board: Single<&mut Visibility, With<Scoreboard>>,
     mut text: Single<&mut Text, With<ScoreboardText>>,
 ) {
@@ -1278,24 +1536,42 @@ fn update_scoreboard(
     if !show {
         return;
     }
+    let my_id = session.my_id;
     let mut s = format!(
-        "{:<16} {:<8} {:>5} {:>6} {:>7} {:>7}\n",
-        "Player", "Class", "Level", "Kills", "Score", "Points"
+        "═ MISSION STATUS: {} (ROUND {}) ═\n",
+        map_name(state.map).to_uppercase(),
+        state.round
     );
+    s += "┌──────────────────┬──────────┬───────┬───────┬─────────┬─────────┬──────────┐\n";
+    s += "│ Player           │ Class    │ Level │ Kills │ Score   │ Points  │ Status   │\n";
+    s += "├──────────────────┼──────────┼───────┼───────┼─────────┼─────────┼──────────┤\n";
     let mut players: Vec<_> = roster.0.values().collect();
     players.sort_by_key(|p| std::cmp::Reverse(p.score));
-    for p in players {
-        let down = if p.alive { "" } else { " (down)" };
+    let mut total_kills = 0;
+    let mut total_score = 0;
+    for p in &players {
+        total_kills += p.kills;
+        total_score += p.score;
+        let is_me = p.id == my_id;
+        let name_tag = if is_me {
+            format!("★ {}", p.name)
+        } else {
+            p.name.clone()
+        };
+        let status = if p.alive { "ACTIVE" } else { "DOWNED" };
         s += &format!(
-            "{:<16} {:<8} {:>5} {:>6} {:>7} {:>7}{down}\n",
-            p.name,
+            "│ {:<16} │ {:<8} │ {:>5} │ {:>5} │ {:>7} │ {:>7} │ {:<8} │\n",
+            if name_tag.len() > 16 { &name_tag[..16] } else { &name_tag },
             p.character.name(),
             p.level,
             p.kills,
             p.score,
-            p.points
+            p.points,
+            status
         );
     }
+    s += "└──────────────────┴──────────┴───────┴───────┴─────────┴─────────┴──────────┘\n";
+    s += &format!("  TEAM TOTALS: {} Kills  |  {} Score", total_kills, total_score);
     set(&mut text, s);
 }
 

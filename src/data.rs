@@ -1973,6 +1973,15 @@ impl PowerUp {
             PowerUp::MaxAmmo => Color::srgb(0.3, 0.6, 1.0),
         }
     }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            PowerUp::Nuke => "Eliminates all active zombies & grants +400 pts",
+            PowerUp::InstaKill => "One-shot kill on any normal zombie",
+            PowerUp::DoublePoints => "Doubles all points earned from hits and kills",
+            PowerUp::MaxAmmo => "Fully replenishes ammo magazines and reserves",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

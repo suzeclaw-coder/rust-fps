@@ -22,6 +22,8 @@ use crate::{
     AppState, BoxState, Enemy, EnemyStatus, MatchState, NetKind, Phase, Replicated, Roster, Session,
 };
 
+use std::f32::consts::TAU;
+
 pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
@@ -37,6 +39,9 @@ impl Plugin for AudioPlugin {
                         movement_sounds,
                         enemy_sounds,
                         match_sounds,
+                        tension_sounds,
+                        ambient_sounds,
+                        combat_feedback_sounds,
                     )
                         .in_set(Phase::Present)
                         .run_if(in_state(AppState::InGame)),
@@ -132,6 +137,11 @@ pub enum Snd {
     Hiss,
     Wail,
     Warcry,
+    Heartbeat,
+    Ambience,
+    AbilityReady,
+    CountdownLow,
+    CountdownHigh,
 }
 
 impl Snd {
@@ -143,11 +153,10 @@ impl Snd {
             | Bolt | Shell | Swap | HitTick | HitHead | Kill | MeleeSwing | MeleeHit => Group::Guns,
             Groan | BruteRoar | ShooterHiss | CrawlerRasp | ZombieAttack | ZombieHurt
             | ZombieDeath | Spit => Group::Enemies,
-            Step | StepSoft | Jump | Land | Slide | PlayerHurt => Group::Movement,
+            Step | StepSoft | Jump | Land | Slide | PlayerHurt | Heartbeat => Group::Movement,
             Explosion | BigExplosion | Slam | Fire | Ice | Heal | Zap | Slash | Whoosh | Orbital
-            | BladeStorm | Throw | Chain | Twang | Snap | Shatter | Hiss | Wail | Warcry => {
-                Group::Effects
-            }
+            | BladeStorm | Throw | Chain | Twang | Snap | Shatter | Hiss | Wail | Warcry
+            | Ambience => Group::Effects,
             _ => Group::Interface,
         }
     }
@@ -167,8 +176,13 @@ impl Snd {
             Step | StepSoft => (0.35, 6.0),
             Door => (0.8, 20.0),
             BoxJingle | BoxReady | BoxFly => (0.6, 14.0),
-            HitHead => (0.7, 100.0),
-            HitTick | Kill => (0.55, 100.0),
+            HitHead => (0.8, 100.0),
+            HitTick | Kill => (0.6, 100.0),
+            Heartbeat => (0.85, 10.0),
+            Ambience => (0.45, 40.0),
+            AbilityReady => (0.7, 100.0),
+            CountdownLow => (0.6, 100.0),
+            CountdownHigh => (0.75, 100.0),
             UiClick | CrateTick => (0.4, 100.0),
             _ => (0.65, 15.0),
         }
@@ -296,7 +310,8 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     add(Slide, whoosh(0.6, 500.0, 1800.0, 15));
     for i in 0..3 {
         add(HitTick, hitmarker_tick(140 + i));
-        add(HitHead, skull_pop(150 + i));
+        add(HitHead, headshot_ding(150 + i));
+        add(HitHead, skull_pop(155 + i));
         add(Kill, kill_sound(160 + i));
     }
 
@@ -558,16 +573,30 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     );
     add(
         RoundStart,
-        bell(
-            &[
-                (110.0, 1.0, 2.0),
-                (220.0, 0.6, 1.4),
-                (331.0, 0.4, 1.0),
-                (462.0, 0.25, 0.6),
-            ],
-            3.0,
-        ),
+        round_start_stinger(630)
+            .mix(
+                &bell(
+                    &[
+                        (110.0, 1.0, 2.0),
+                        (220.0, 0.6, 1.4),
+                        (331.0, 0.4, 1.0),
+                        (462.0, 0.25, 0.6),
+                    ],
+                    3.0,
+                ),
+                0.0,
+                0.6,
+            )
+            .normalize(0.95),
     );
+    for i in 0..2 {
+        add(Heartbeat, heartbeat(800 + i));
+    }
+    add(Ambience, ambient_wind(3.5, 810));
+    add(Ambience, ambient_drone(3.2, 811));
+    add(AbilityReady, ability_ready(820));
+    add(CountdownLow, countdown_beep(false, 830));
+    add(CountdownHigh, countdown_beep(true, 831));
     add(
         RoundEnd,
         bell(
@@ -1063,9 +1092,20 @@ fn match_sounds(
     if let Some(prev) = last.as_ref() {
         if state.round != prev.round && state.round > 0 {
             sounds.here(Snd::RoundStart);
+            sounds.push(Snd::CountdownHigh, None, 0.85, 1.0);
         }
         if state.intermission > 0.0 && prev.intermission <= 0.0 && state.round > 0 {
             sounds.here(Snd::RoundEnd);
+        }
+        // Countdown beeps (3, 2, 1) during intermission before round starts
+        if state.intermission > 0.0 && state.intermission <= 3.5 {
+            let t_now = state.intermission;
+            let t_prev = prev.intermission;
+            for threshold in [3.0, 2.0, 1.0] {
+                if t_prev > threshold && t_now <= threshold {
+                    sounds.push(Snd::CountdownLow, None, 0.7, 1.0);
+                }
+            }
         }
         if state.game_over && !prev.game_over {
             sounds.here(Snd::GameOver);
@@ -1125,3 +1165,113 @@ fn ui_sounds(
         }
     }
 }
+
+/// Low-health tension audio: plays a pulsing visceral heartbeat when health is < 30%,
+/// accelerating as the player nears death.
+fn tension_sounds(
+    time: Res<Time>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    mut sounds: ResMut<SoundQueue>,
+    mut timer: Local<f32>,
+) {
+    let Some(me) = roster.me(&session) else { return };
+    let max = me.max_health();
+    if me.alive && me.health > 0.0 && me.health < max * 0.3 {
+        // hp_ratio: 0.0 at 0 HP, 1.0 at 30% HP
+        let hp_ratio = (me.health / (max * 0.3)).clamp(0.0, 1.0);
+        // Interval: ~0.38s (fast pounding ~158 bpm) at critical death, ~1.05s (~57 bpm) at 30%
+        let interval = 0.38 + hp_ratio * 0.67;
+        *timer -= time.delta_secs();
+        if *timer <= 0.0 {
+            *timer = interval;
+            // Higher pitch and louder gain as health is lower
+            let pitch = 1.0 + (1.0 - hp_ratio) * 0.22;
+            let gain = 0.75 + (1.0 - hp_ratio) * 0.45;
+            sounds.push(Snd::Heartbeat, None, gain, pitch);
+        }
+    } else {
+        *timer = 0.0;
+    }
+}
+
+/// Atmospheric map ambience: triggers periodic eerie wind gusts, ambient drones,
+/// and distant unsettling zombie groans/wails.
+fn ambient_sounds(
+    time: Res<Time>,
+    listener: Query<&GlobalTransform, With<LocalPlayer>>,
+    mut sounds: ResMut<SoundQueue>,
+    mut wind_timer: Local<f32>,
+    mut distant_timer: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    let mut rng = rand::thread_rng();
+
+    // Subtle wind bed / atmospheric drone trigger (every 8 to 14 seconds)
+    *wind_timer -= dt;
+    if *wind_timer <= 0.0 {
+        *wind_timer = rng.gen_range(8.0..14.0);
+        let gain = rng.gen_range(0.35..0.55);
+        let pitch = rng.gen_range(0.92..1.08);
+        sounds.push(Snd::Ambience, None, gain, pitch);
+    }
+
+    // Distant spooky groans / eerie wails in 3D space around player (every 12 to 22 seconds)
+    *distant_timer -= dt;
+    if *distant_timer <= 0.0 {
+        *distant_timer = rng.gen_range(12.0..22.0);
+        let ear = listener.iter().next().map_or(Vec3::ZERO, |g| g.translation());
+        let angle = rng.gen_range(0.0..TAU);
+        let dist = rng.gen_range(20.0..35.0);
+        let pos = ear + Vec3::new(angle.cos() * dist, rng.gen_range(1.0..4.0), angle.sin() * dist);
+        let snd = if rng.gen_bool(0.4) { Snd::Wail } else { Snd::Groan };
+        let gain = rng.gen_range(0.25..0.45);
+        let pitch = rng.gen_range(0.7..1.1);
+        sounds.push(snd, Some(pos), gain, pitch);
+    }
+}
+
+/// Ability ready notifications: chimes when an ability or ultimate finishes cooldown.
+fn combat_feedback_sounds(
+    session: Res<Session>,
+    roster: Res<Roster>,
+    mut sounds: ResMut<SoundQueue>,
+    mut prev_ready: Local<Option<[bool; 5]>>,
+) {
+    let Some(me) = roster.me(&session) else {
+        *prev_ready = None;
+        return;
+    };
+    if !me.alive {
+        *prev_ready = None;
+        return;
+    }
+    let current_ready = [
+        me.charges[0] > 0,
+        me.charges[1] > 0,
+        me.ult_charge >= 100.0,
+        me.weapon_cd[0] <= 0.0,
+        me.weapon_cd[1] <= 0.0,
+    ];
+
+    if let Some(prev) = *prev_ready {
+        for (i, (&now, &was)) in current_ready.iter().zip(prev.iter()).enumerate() {
+            if now && !was {
+                // Ability just became ready!
+                let (pitch, gain) = if i == 2 {
+                    // Ultimate ready: higher pitch, more triumphant
+                    (1.15, 0.85)
+                } else if i >= 3 {
+                    // Weapon ability
+                    (0.95, 0.65)
+                } else {
+                    // Standard tactical ability
+                    (1.0, 0.75)
+                };
+                sounds.push(Snd::AbilityReady, None, gain, pitch);
+            }
+        }
+    }
+    *prev_ready = Some(current_ready);
+}
+
