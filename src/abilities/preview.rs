@@ -6,7 +6,7 @@ use std::f32::consts::TAU;
 use super::{move_time, CastState, DASH_SPEED, GRAPPLE_RANGE, GRENADE_GRAVITY, GRENADE_LIFT, GRENADE_SPEED};
 use crate::data::Ability;
 use crate::markers::{Marker, Markers, Shape, PREVIEW};
-use crate::physics::{collect_boxes, line_of_sight, ray_world, Boxes};
+use crate::physics::{collect_boxes, ground_height, line_of_sight, ray_world, ray_world_normal, Boxes};
 use crate::player::LocalPlayer;
 use crate::sim::powers::{aim_ground, PLAGUE_MAX, PLAGUE_START};
 use crate::{Collider, Enemy, Roster, Session};
@@ -58,22 +58,80 @@ fn sky_target(markers: &mut Markers, gizmos: &mut Gizmos, at: Vec3, r: f32, colo
 }
 
 /// The arc a thrown gadget flies, and where it lands.
-fn throw_arc(gizmos: &mut Gizmos, origin: Vec3, forward: Vec3, speed: f32, boxes: &Boxes, color: Color) -> Vec3 {
+fn throw_arc(
+    gizmos: &mut Gizmos,
+    origin: Vec3,
+    forward: Vec3,
+    speed: f32,
+    boxes: &Boxes,
+    color: Color,
+    sticky: bool,
+) -> Vec3 {
     let mut pos = origin + forward * 0.6;
     let mut vel = forward * speed + Vec3::Y * GRENADE_LIFT;
     let mut pts = vec![pos];
     let step = 0.025;
+    let mut bounces = 0;
     for _ in 0..200 {
         vel.y -= GRENADE_GRAVITY * step;
         let next = pos + vel * step;
-        if next.y < 0.1 || !line_of_sight(pos, next, boxes) {
-            break;
+        let floor_y = ground_height(next, 0.2, next.y, boxes);
+        let contact_y = floor_y + 0.1;
+
+        if next.y <= contact_y {
+            pos = Vec3::new(next.x, contact_y, next.z);
+            pts.push(pos);
+            if sticky || bounces >= 3 || vel.y >= -1.5 {
+                break;
+            }
+            bounces += 1;
+            vel.y = -vel.y * 0.45;
+            vel.x *= 0.65;
+            vel.z *= 0.65;
+            if vel.length() < 0.5 {
+                break;
+            }
+        } else if !line_of_sight(pos, next, boxes) {
+            if sticky || bounces >= 3 {
+                pts.push(next);
+                pos = next;
+                break;
+            }
+            let disp = next - pos;
+            let dist = disp.length();
+            let hit = if dist > 1e-4 {
+                ray_world_normal(pos, disp / dist, dist, boxes)
+            } else {
+                None
+            };
+            if let Some((hit_dist, normal)) = hit {
+                pos = pos + (disp / dist) * (hit_dist - 0.04).max(0.0);
+                pts.push(pos);
+                bounces += 1;
+                let n = normal.normalize();
+                let v_dot_n = vel.dot(n);
+                if v_dot_n < 0.0 {
+                    let v_normal = n * v_dot_n;
+                    let v_tangent = vel - v_normal;
+                    let restitution = if n.y > 0.7 { 0.45 } else { 0.55 };
+                    let friction = if n.y > 0.7 { 0.65 } else { 0.85 };
+                    vel = v_tangent * friction - v_normal * restitution;
+                } else {
+                    vel = Vec3::new(-vel.x * 0.55, vel.y * 0.85, -vel.z * 0.55);
+                }
+            } else {
+                pts.push(next);
+                pos = next;
+                break;
+            }
+        } else {
+            pos = next;
+            pts.push(pos);
         }
-        pos = next;
-        pts.push(pos);
     }
     gizmos.linestrip(pts, color);
-    pos.with_y(0.0)
+    let floor_y = ground_height(pos, 0.2, pos.y, boxes);
+    pos.with_y(floor_y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,7 +194,7 @@ pub fn draw_previews(
 
         // Medic
         A::HealingGrenade => {
-            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED, &boxes, line_col);
+            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED, &boxes, line_col, false);
             flat_circle(&mut markers, at, 5.0 + 0.3 * tier, color);
         }
         A::NeurotoxinDart => {
@@ -174,7 +232,7 @@ pub fn draw_previews(
 
         // Demolisher
         A::StickyBomb => {
-            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED * 1.2, &boxes, line_col);
+            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED * 1.2, &boxes, line_col, true);
             flat_circle(&mut markers, at, 4.5, color);
         }
         A::BlastJump => {
@@ -195,7 +253,7 @@ pub fn draw_previews(
 
         // Chemist
         A::AcidFlask => {
-            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED, &boxes, line_col);
+            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED, &boxes, line_col, false);
             flat_circle(&mut markers, at, 3.5 + 0.3 * tier, color);
         }
         A::ToxicCloud => {
@@ -245,7 +303,7 @@ pub fn draw_previews(
             cone(&mut markers, feet, flat, 12.0, 0.45, color.with_alpha(0.3));
         }
         A::BearTrap => {
-            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED * 0.85, &boxes, line_col);
+            let at = throw_arc(&mut gizmos, origin, forward, GRENADE_SPEED * 0.85, &boxes, line_col, false);
             flat_circle(&mut markers, at, 1.8, color);
         }
         A::ArrowStorm => sky_target(&mut markers, &mut gizmos, ground(60.0), 8.0, color),

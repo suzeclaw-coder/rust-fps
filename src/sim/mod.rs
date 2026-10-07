@@ -106,6 +106,7 @@ pub fn enemy_scale(kind: NetKind) -> f32 {
 pub struct EnemyBrain {
     pub kind: NetKind,
     pub health: f32,
+    pub knockback: Vec3,
     speed: f32,
     attack_timer: f32,
     burn: f32,
@@ -179,12 +180,25 @@ pub const BRUTE_SLAM_RADIUS: f32 = 2.0;
 pub const BRUTE_SLAM_AHEAD: f32 = 1.0;
 /// Shooters' fireballs fly straight at this speed.
 pub const FIREBALL_SPEED: f32 = 15.0;
+/// Ballistic gravity acceleration pulling projectiles downward over distance.
+pub const PROJECTILE_GRAVITY: f32 = 4.0;
 
 #[derive(Component)]
 pub struct FireballBrain {
-    velocity: Vec3,
-    life: f32,
-    damage: f32,
+    pub velocity: Vec3,
+    pub life: f32,
+    pub damage: f32,
+}
+
+impl FireballBrain {
+    #[allow(dead_code)]
+    pub fn new(velocity: Vec3, life: f32, damage: f32) -> Self {
+        Self {
+            velocity,
+            life,
+            damage,
+        }
+    }
 }
 
 /// A lasting damage area (see `Fx::Zone` for the kinds).
@@ -228,6 +242,7 @@ struct DamageEvent {
     chained: bool,
     /// Seconds the target is stunned (frozen, choking, knocked down).
     stun: f32,
+    pub knockback: Vec3,
 }
 
 #[derive(Resource, Default)]
@@ -285,6 +300,8 @@ fn explode(
         let d = (*p + Vec3::Y).distance(pos);
         if d < radius {
             let falloff = 1.0 - 0.5 * (d / radius);
+            let dir = ((*p + Vec3::Y * 0.5) - pos).normalize_or(Vec3::Y);
+            let force = (1.0 - (d / radius).clamp(0.0, 1.0)) * 14.0;
             queue.0.push(DamageEvent {
                 target: *e,
                 amount: damage * falloff,
@@ -294,6 +311,7 @@ fn explode(
                 elements,
                 chained: false,
                 stun: 0.0,
+                knockback: dir * force,
             });
         }
     }
@@ -581,6 +599,7 @@ fn process_actions(
                         elements: 0,
                         chained: false,
                         stun: 0.0,
+                        knockback: dir * 6.0,
                     });
                 }
             }
@@ -851,6 +870,9 @@ fn resolve_shots(
             1.0
         };
         let mut amount = def.damage * mult * pellets * if headshot { def.headshot } else { 1.0 };
+        if hit.penetrated {
+            amount *= crate::physics::PENETRATION_DAMAGE_FACTOR;
+        }
         if buff.execute > 0.0 {
             if let Ok((_, _, b)) = enemies.get(entity) {
                 if !b.kind.is_boss() && b.health - amount < buff.execute * b.max_health {
@@ -867,6 +889,7 @@ fn resolve_shots(
             elements,
             chained: false,
             stun: buff.stun,
+            knockback: Vec3::ZERO,
         });
         let jumps = match def.special {
             GunSpecial::Chain { jumps } => jumps as u8 + buff.chain,
@@ -903,6 +926,7 @@ fn resolve_shots(
                     elements,
                     chained: true,
                     stun: 0.0,
+                    knockback: Vec3::ZERO,
                 });
             }
         }
@@ -951,6 +975,7 @@ fn status_effects(
                 elements: 0,
                 chained: true,
                 stun: 0.0,
+                knockback: Vec3::ZERO,
             });
         }
         if b.poison > 0.0 {
@@ -964,6 +989,7 @@ fn status_effects(
                 elements: 0,
                 chained: true,
                 stun: 0.0,
+                knockback: Vec3::ZERO,
             });
         }
         b.marked -= dt;
@@ -984,7 +1010,7 @@ fn apply_damage(
     mut state: ResMut<MatchState>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
-    mut enemies: Query<(Entity, &Transform, &mut EnemyBrain, &mut EnemyStatus)>,
+    mut enemies: Query<(Entity, &mut Transform, &mut EnemyBrain, &mut EnemyStatus)>,
     time: Res<Time>,
     mut last_drop: Local<Option<f32>>,
 ) {
@@ -1012,12 +1038,13 @@ fn apply_damage(
         );
         let mut amount = ev.amount;
         i += 1;
-        let Ok((_, tf, mut brain, mut status)) = enemies.get_mut(target) else {
+        let Ok((_, mut tf, mut brain, mut status)) = enemies.get_mut(target) else {
             continue;
         };
         if brain.health <= 0.0 {
             continue;
         }
+        let pos = tf.translation;
         if state.insta_kill > 0.0 && from.is_some() && !chained && !brain.kind.is_boss() {
             amount = amount.max(brain.health);
         }
@@ -1041,6 +1068,9 @@ fn apply_damage(
             _ => 1.0,
         };
         brain.stun = brain.stun.max(stun * resist);
+        if ev.knockback != Vec3::ZERO {
+            brain.knockback += ev.knockback * resist;
+        }
         // Heavy single-hit damage (slugs, sniper rifle shots, high-impact hits)
         // or critical hits trigger a micro-stagger / momentary flinch so impactful shots feel weighty.
         let heavy_threshold = 75.0;
@@ -1049,10 +1079,16 @@ fn apply_damage(
             let flinch_duration = if headshot { 0.18 } else { 0.12 } * resist;
             brain.flinch = brain.flinch.max(flinch_duration);
         }
+        if is_heavy_hit {
+            if let Some(p) = from.and_then(|id| roster.0.get(&id)) {
+                let shooter_feet = p.feet();
+                let push_dir = (pos - shooter_feet).with_y(0.0).normalize_or_zero();
+                brain.knockback += push_dir * (amount * 0.08 * resist);
+            }
+        }
         if !chained || amount > 5.0 {
             status.flash = if headshot { 0.12 } else { 0.08 };
         }
-        let pos = tf.translation;
         for el in elements_in(elements) {
             match el {
                 Element::Fire => {
@@ -1085,6 +1121,7 @@ fn apply_damage(
                             elements: 0,
                             chained: true,
                             stun: 0.0,
+                            knockback: Vec3::ZERO,
                         });
                     }
                 }
@@ -1116,17 +1153,23 @@ fn apply_damage(
                     let radius = 4.0;
                     let blast = 160.0 + 40.0 * round as f32;
                     for (e, q) in &positions {
-                        if *e != target && q.distance(pos) < radius {
-                            queue.0.push(DamageEvent {
-                                target: *e,
-                                amount: blast,
-                                from,
-                                headshot: false,
-                                legs: false,
-                                elements: 0,
-                                chained: true,
-                                stun: 0.3,
-                            });
+                        if *e != target {
+                            let d = (*q + Vec3::Y).distance(pos);
+                            if d < radius {
+                                let dir = ((*q + Vec3::Y * 0.5) - pos).normalize_or(Vec3::Y);
+                                let force = (1.0 - (d / radius).clamp(0.0, 1.0)) * 14.0;
+                                queue.0.push(DamageEvent {
+                                    target: *e,
+                                    amount: blast,
+                                    from,
+                                    headshot: false,
+                                    legs: false,
+                                    elements: 0,
+                                    chained: true,
+                                    stun: 0.3,
+                                    knockback: dir * force,
+                                });
+                            }
                         }
                     }
                     emit(
@@ -1159,8 +1202,18 @@ fn apply_damage(
         if killed {
             let hit_h = if headshot { 1.5 } else if legs { 0.4 } else { 1.0 };
             let hit_pos = pos + Vec3::Y * (hit_h * enemy_scale(brain.kind));
-            let shot_dir = if let Some(pid) = from.and_then(|id| roster.0.get(&id)) {
-                (pos - pid.feet()).normalize_or(Vec3::Z)
+            let recoil_dir = if brain.knockback.length_squared() > 0.01 {
+                brain.knockback.with_y(0.0).normalize_or_zero()
+            } else if let Some(pid) = from.and_then(|id| roster.0.get(&id)) {
+                (pos - pid.feet()).with_y(0.0).normalize_or_zero()
+            } else {
+                Vec3::ZERO
+            };
+            if recoil_dir != Vec3::ZERO {
+                tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -recoil_dir);
+            }
+            let shot_dir = if recoil_dir != Vec3::ZERO {
+                recoil_dir
             } else {
                 Vec3::Y
             };
@@ -1565,6 +1618,7 @@ fn spawn_zombie(
     commands.entity(e).insert(EnemyBrain {
         kind,
         health,
+        knockback: Vec3::ZERO,
         speed,
         attack_timer: 1.0,
         burn: 0.0,
@@ -1666,6 +1720,249 @@ fn sandbox(
     }
 }
 
+/// Base collision radius for standard human-sized enemies (0.45m).
+pub const STANDARD_ENEMY_RADIUS: f32 = 0.45;
+/// Maximum soft-body repulsive separation velocity to prevent explosive jitter (12.0 m/s).
+pub const MAX_SEPARATION_FORCE: f32 = 12.0;
+/// Separation force stiffness multiplier.
+pub const SEPARATION_STIFFNESS: f32 = 8.0;
+
+/// Standard radius for crowd separation: ~0.45m * enemy_scale.
+pub fn enemy_radius(kind: NetKind) -> f32 {
+    STANDARD_ENEMY_RADIUS * enemy_scale(kind)
+}
+
+/// Mass / weight hierarchy for crowd separation:
+/// Brutes (3.5) and Bosses (6.0 - 8.0) have significantly higher mass than standard zombies (1.0),
+/// allowing them to push lighter enemies aside like a bowling ball while remaining unaffected by lighter enemies.
+pub fn enemy_mass(kind: NetKind) -> f32 {
+    match kind {
+        NetKind::Boss(0) => 6.0,
+        NetKind::Boss(_) => 8.0,
+        NetKind::Brute => 3.5,
+        _ => 1.0,
+    }
+}
+
+/// Spatial hash grid for accelerated broadphase crowd neighbor queries.
+pub struct CrowdSpatialGrid {
+    pub cell_size: f32,
+    pub cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl CrowdSpatialGrid {
+    pub fn new(cell_size: f32, capacity: usize) -> Self {
+        Self {
+            cell_size,
+            cells: HashMap::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, index: usize, pos: Vec3) {
+        let cx = (pos.x / self.cell_size).floor() as i32;
+        let cz = (pos.z / self.cell_size).floor() as i32;
+        self.cells.entry((cx, cz)).or_default().push(index);
+    }
+
+    pub fn query_neighbors<'a>(&'a self, pos: Vec3, radius: f32) -> impl Iterator<Item = usize> + 'a {
+        let min_cx = ((pos.x - radius) / self.cell_size).floor() as i32;
+        let max_cx = ((pos.x + radius) / self.cell_size).floor() as i32;
+        let min_cz = ((pos.z - radius) / self.cell_size).floor() as i32;
+        let max_cz = ((pos.z + radius) / self.cell_size).floor() as i32;
+
+        (min_cx..=max_cx).flat_map(move |cx| {
+            (min_cz..=max_cz).flat_map(move |cz| {
+                self.cells.get(&(cx, cz)).into_iter().flat_map(|v| v.iter().copied())
+            })
+        })
+    }
+}
+
+/// Computes crowd separation force using spatial grid acceleration.
+pub fn compute_crowd_separation_grid(
+    entity: Entity,
+    pos: Vec3,
+    kind: NetKind,
+    flank_bias: f32,
+    crowd: &[(Entity, Vec3, NetKind)],
+    grid: &CrowdSpatialGrid,
+) -> Vec3 {
+    let mut total_force = Vec3::ZERO;
+    let r1 = enemy_radius(kind);
+    let m1 = enemy_mass(kind);
+    let max_radius = enemy_radius(NetKind::Boss(1));
+    let max_search_dist = r1 + max_radius;
+
+    for other_idx in grid.query_neighbors(pos, max_search_dist) {
+        if other_idx >= crowd.len() {
+            continue;
+        }
+        let (other_entity, other_pos, other_kind) = crowd[other_idx];
+        if other_entity == entity {
+            continue;
+        }
+
+        let delta = (pos - other_pos).with_y(0.0);
+        let dist_sq = delta.length_squared();
+        let r2 = enemy_radius(other_kind);
+        let mutual_radius = r1 + r2;
+
+        if dist_sq >= mutual_radius * mutual_radius {
+            continue;
+        }
+
+        let dist = dist_sq.sqrt();
+        let overlap = mutual_radius - dist;
+        let dir = if dist > 1e-4 {
+            delta / dist
+        } else {
+            let angle = (entity.index() as f32 * 2.399).sin();
+            Vec3::new(angle.cos(), 0.0, angle.sin()).normalize_or_zero()
+        };
+
+        // Separation vector: push = normalize(pos - other_pos) * (r1 + r2 - dist)
+        let push = dir * overlap;
+
+        // Mass / weight hierarchy:
+        // Brutes and Bosses push lighter zombies without being pushed back
+        let m2 = enemy_mass(other_kind);
+        let mass_weight = if m2 > m1 {
+            m2 / m1
+        } else if (m2 - m1).abs() < 1e-4 {
+            1.0
+        } else {
+            0.0
+        };
+
+        if mass_weight <= 0.0 {
+            continue;
+        }
+
+        let lateral = if flank_bias.abs() > 1e-4 {
+            let perp = Vec3::new(-dir.z, 0.0, dir.x) * flank_bias.signum();
+            perp * (overlap * 2.5)
+        } else {
+            Vec3::ZERO
+        };
+
+        let pair_force = (push * SEPARATION_STIFFNESS + lateral) * mass_weight;
+        total_force += pair_force;
+    }
+
+    if total_force.length_squared() > MAX_SEPARATION_FORCE * MAX_SEPARATION_FORCE {
+        total_force = total_force.normalize() * MAX_SEPARATION_FORCE;
+    }
+
+    total_force
+}
+
+/// Computes mutual repulsive crowd separation force for an enemy among nearby enemies.
+/// Filters enemies by distance, applies mass/weight hierarchy, lateral flank flow,
+/// and clamps maximum force to prevent jitter.
+pub fn compute_crowd_separation(
+    entity: Entity,
+    pos: Vec3,
+    kind: NetKind,
+    flank_bias: f32,
+    crowd: &[(Entity, Vec3, NetKind)],
+) -> Vec3 {
+    let mut total_force = Vec3::ZERO;
+    let r1 = enemy_radius(kind);
+    let m1 = enemy_mass(kind);
+    let max_radius = enemy_radius(NetKind::Boss(1));
+    let max_search_dist = r1 + max_radius;
+    let max_search_dist_sq = max_search_dist * max_search_dist;
+
+    for &(other_entity, other_pos, other_kind) in crowd {
+        if other_entity == entity {
+            continue;
+        }
+
+        let delta = (pos - other_pos).with_y(0.0);
+        let dist_sq = delta.length_squared();
+
+        if dist_sq >= max_search_dist_sq {
+            continue;
+        }
+
+        let r2 = enemy_radius(other_kind);
+        let mutual_radius = r1 + r2;
+
+        if dist_sq >= mutual_radius * mutual_radius {
+            continue;
+        }
+
+        let dist = dist_sq.sqrt();
+        let overlap = mutual_radius - dist;
+        let dir = if dist > 1e-4 {
+            delta / dist
+        } else {
+            let angle = (entity.index() as f32 * 2.399).sin();
+            Vec3::new(angle.cos(), 0.0, angle.sin()).normalize_or_zero()
+        };
+
+        let push = dir * overlap;
+
+        let m2 = enemy_mass(other_kind);
+        let mass_weight = if m2 > m1 {
+            m2 / m1
+        } else if (m2 - m1).abs() < 1e-4 {
+            1.0
+        } else {
+            0.0
+        };
+
+        if mass_weight <= 0.0 {
+            continue;
+        }
+
+        let lateral = if flank_bias.abs() > 1e-4 {
+            let perp = Vec3::new(-dir.z, 0.0, dir.x) * flank_bias.signum();
+            perp * (overlap * 2.5)
+        } else {
+            Vec3::ZERO
+        };
+
+        let pair_force = (push * SEPARATION_STIFFNESS + lateral) * mass_weight;
+        total_force += pair_force;
+    }
+
+    if total_force.length_squared() > MAX_SEPARATION_FORCE * MAX_SEPARATION_FORCE {
+        total_force = total_force.normalize() * MAX_SEPARATION_FORCE;
+    }
+
+    total_force
+}
+
+/// Crowd Separation Physics & Movement Integration for an enemy:
+/// Accumulates soft-body mutual repulsive separation forces into the enemy's velocity vector,
+/// applying mass hierarchy and clamping to prevent clumping and explosive jitter.
+pub fn move_enemies(
+    entity: Entity,
+    pos: Vec3,
+    kind: NetKind,
+    flank_bias: f32,
+    velocity: &mut Vec3,
+    crowd: &[(Entity, Vec3, NetKind)],
+) {
+    let separation = compute_crowd_separation(entity, pos, kind, flank_bias, crowd);
+    *velocity += separation;
+}
+
+/// Fast version of move_enemies using a pre-constructed spatial grid.
+pub fn move_enemies_with_grid(
+    entity: Entity,
+    pos: Vec3,
+    kind: NetKind,
+    flank_bias: f32,
+    velocity: &mut Vec3,
+    crowd: &[(Entity, Vec3, NetKind)],
+    grid: &CrowdSpatialGrid,
+) {
+    let separation = compute_crowd_separation_grid(entity, pos, kind, flank_bias, crowd, grid);
+    *velocity += separation;
+}
+
 fn enemy_ai(
     mut commands: Commands,
     time: Res<Time>,
@@ -1692,11 +1989,25 @@ fn enemy_ai(
         .collect();
     let target_points: Vec<Vec3> = targets.iter().map(|t| t.1).collect();
     nav.update(dt, &boxes, &target_points);
-    let positions: Vec<(Entity, Vec3)> =
-        enemies.iter().map(|(e, t, _)| (e, t.translation)).collect();
+    let crowd: Vec<(Entity, Vec3, NetKind)> = enemies
+        .iter()
+        .map(|(e, t, b)| (e, t.translation, b.kind))
+        .collect();
+    let grid = if crowd.len() > 16 {
+        let mut g = CrowdSpatialGrid::new(2.5, crowd.len());
+        for (i, &(_, p, _)) in crowd.iter().enumerate() {
+            g.insert(i, p);
+        }
+        Some(g)
+    } else {
+        None
+    };
     let half = map.0.half;
 
     for (entity, mut tf, mut enemy) in &mut enemies {
+        let decay = (-8.0 * dt).exp();
+        enemy.knockback *= decay;
+
         let pos = tf.translation;
         let scale = enemy_scale(enemy.kind);
         let target = targets.iter().min_by(|a, b| {
@@ -1705,6 +2016,14 @@ fn enemy_ai(
         });
         let mut velocity = Vec3::ZERO;
         let Some(&(target_id, target_feet)) = target else {
+            if enemy.knockback.length_squared() > 1e-4 {
+                let mut new_pos = pos + enemy.knockback * dt;
+                new_pos.y = 0.0;
+                resolve_collisions(&mut new_pos, 0.38 * scale, 0.0, &boxes);
+                new_pos.x = new_pos.x.clamp(-half + 0.5, half - 0.5);
+                new_pos.z = new_pos.z.clamp(-half + 0.5, half - 0.5);
+                tf.translation = new_pos;
+            }
             continue;
         };
         let to_target = (target_feet - pos).with_y(0.0);
@@ -1771,21 +2090,28 @@ fn enemy_ai(
                 }
             }
         }
-        for (other, opos) in &positions {
-            if *other == entity {
-                continue;
-            }
-            let away = (pos - *opos).with_y(0.0);
-            let d = away.length();
-            let sep_radius = 1.35 * scale;
-            if d < sep_radius && d > 1e-3 {
-                let overlap = (sep_radius - d) / sep_radius;
-                let repulse = away / d;
-                let perp = Vec3::new(-repulse.z, 0.0, repulse.x) * enemy.flank_bias.signum();
-                velocity += (repulse * 5.5 + perp * 2.0) * overlap;
-            }
+        // Soft-body crowd separation physics with mass hierarchy and spatial acceleration
+        if let Some(ref g) = grid {
+            move_enemies_with_grid(
+                entity,
+                pos,
+                enemy.kind,
+                enemy.flank_bias,
+                &mut velocity,
+                &crowd,
+                g,
+            );
+        } else {
+            move_enemies(
+                entity,
+                pos,
+                enemy.kind,
+                enemy.flank_bias,
+                &mut velocity,
+                &crowd,
+            );
         }
-        let mut new_pos = pos + velocity * dt;
+        let mut new_pos = pos + (velocity + enemy.knockback) * dt;
         new_pos.y = 0.0;
         resolve_collisions(&mut new_pos, 0.38 * scale, 0.0, &boxes);
         new_pos.x = new_pos.x.clamp(-half + 0.5, half - 0.5);
@@ -1967,18 +2293,23 @@ fn projectiles(
     time: Res<Time>,
     mut roster: ResMut<Roster>,
     mut hurt: ResMut<LastHurt>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
     mut shots: Query<(Entity, &mut Transform, &mut FireballBrain)>,
     colliders: Query<(&Transform, &Collider), Without<FireballBrain>>,
 ) {
     let dt = time.delta_secs();
     for (e, mut tf, mut shot) in &mut shots {
+        shot.velocity.y -= PROJECTILE_GRAVITY * dt;
         tf.translation += shot.velocity * dt;
         shot.life -= dt;
-        let pos = tf.translation;
+        let mut pos = tf.translation;
         let mut hit = false;
+        let mut hit_player_id = None;
         for p in roster.0.values_mut().filter(|p| p.alive) {
             if pos.distance(p.feet() + Vec3::Y * 1.0) < 0.9 {
                 hurt_player(p, shot.damage, &mut hurt);
+                hit_player_id = Some(p.id);
                 hit = true;
                 break;
             }
@@ -1988,7 +2319,30 @@ fn projectiles(
                 let d = (pos - ct.translation).abs();
                 d.x < c.half.x && d.y < c.half.y && d.z < c.half.z
             });
-        if hit || hit_wall || shot.life <= 0.0 {
+        if hit || hit_wall {
+            if pos.y < 0.0 {
+                pos.y = 0.0;
+            }
+            emit(
+                &mut fx,
+                &mut out,
+                Fx::Explosion {
+                    pos: pos.to_array(),
+                    radius: 2.0,
+                    color: [1.0, 0.4, 0.1],
+                },
+            );
+            for p in roster.0.values_mut().filter(|p| p.alive) {
+                if pos.distance(p.feet()) < 2.2 {
+                    if hit_player_id != Some(p.id) {
+                        hurt_player(p, shot.damage * 0.6, &mut hurt);
+                    }
+                    let blast_dir = ((p.feet() + Vec3::Y * 0.5) - pos).normalize_or(Vec3::Y);
+                    p.pos = (p.feet() + blast_dir * 0.4).to_array();
+                }
+            }
+            commands.entity(e).despawn();
+        } else if shot.life <= 0.0 {
             commands.entity(e).despawn();
         }
     }
@@ -2043,6 +2397,7 @@ fn zones(
                     elements: z.elements,
                     chained: true,
                     stun: 0.0,
+                    knockback: Vec3::ZERO,
                 });
             }
         }
@@ -2107,6 +2462,7 @@ fn powerups(
                         elements: 0,
                         chained: true,
                         stun: 0.0,
+                        knockback: Vec3::ZERO,
                     });
                     emit(
                         &mut fx,
@@ -2276,3 +2632,501 @@ pub fn new_match(state: &mut MatchState, roster: &mut Roster, map: u8) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_knockback_exponential_decay() {
+        let mut knockback = Vec3::new(12.0, 0.0, -8.0);
+        let dt: f32 = 1.0 / 60.0;
+        let initial_speed = knockback.length();
+
+        // 1 frame of decay
+        let decay = (-8.0f32 * dt).exp();
+        knockback *= decay;
+        assert!(knockback.length() < initial_speed);
+
+        // After 0.5 seconds of frames, knockback should decay substantially (~e^-4 ≈ 0.018)
+        for _ in 1..30 {
+            knockback *= (-8.0f32 * dt).exp();
+        }
+        assert!(knockback.length() < initial_speed * 0.03);
+    }
+
+    #[test]
+    fn test_explode_knockback_impulse_generation() {
+        let mut queue = DamageQueue::default();
+        let mut fx = FxQueue::default();
+        let mut out = FxOutbox::default();
+
+        let blast_pos = Vec3::new(0.0, 0.0, 0.0);
+        let blast_radius = 5.0;
+        let blast_damage = 100.0;
+
+        let close_enemy = (Entity::from_raw(1), Vec3::new(1.0, 0.0, 0.0));
+        let far_enemy = (Entity::from_raw(2), Vec3::new(4.0, 0.0, 0.0));
+        let outside_enemy = (Entity::from_raw(3), Vec3::new(10.0, 0.0, 0.0));
+
+        let enemies = vec![close_enemy, far_enemy, outside_enemy];
+        explode(
+            blast_pos,
+            blast_radius,
+            blast_damage,
+            Some(1),
+            0,
+            &enemies,
+            &mut queue,
+            &mut fx,
+            &mut out,
+            Color::WHITE,
+        );
+
+        // 2 enemies inside blast, 1 outside
+        assert_eq!(queue.0.len(), 2);
+
+        let close_ev = &queue.0[0];
+        assert_eq!(close_ev.target, close_enemy.0);
+        assert!(close_ev.knockback.length() > 0.0);
+        // Direction should push horizontally away from center (+X)
+        assert!(close_ev.knockback.x > 0.0);
+
+        let far_ev = &queue.0[1];
+        assert_eq!(far_ev.target, far_enemy.0);
+        // Closer enemy receives more impulse force
+        assert!(close_ev.knockback.length() > far_ev.knockback.length());
+    }
+
+    #[test]
+    fn test_heavy_hit_directional_impulse_and_resistance() {
+        let shooter_feet = Vec3::new(0.0, 0.0, 0.0);
+        let target_pos = Vec3::new(0.0, 0.0, 5.0);
+        let push_dir = (target_pos - shooter_feet).with_y(0.0).normalize_or_zero();
+        assert_eq!(push_dir, Vec3::new(0.0, 0.0, 1.0));
+
+        let amount = 100.0; // heavy hit >= 75.0
+        let normal_resist = 1.0;
+        let brute_resist = 0.5;
+        let boss_resist = 0.15;
+
+        let normal_impulse = push_dir * (amount * 0.08 * normal_resist);
+        let brute_impulse = push_dir * (amount * 0.08 * brute_resist);
+        let boss_impulse = push_dir * (amount * 0.08 * boss_resist);
+
+        assert!((normal_impulse.z - 8.0).abs() < 1e-5);
+        assert!((brute_impulse.z - 4.0).abs() < 1e-5);
+        assert!((boss_impulse.z - 1.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_death_recoil_orientation() {
+        // Shot came from (0, 0, -5) hitting target at (0, 0, 0) -> shot pushes toward +Z
+        let shooter_feet = Vec3::new(0.0, 0.0, -5.0);
+        let pos = Vec3::ZERO;
+        let recoil_dir = (pos - shooter_feet).with_y(0.0).normalize_or_zero();
+        assert_eq!(recoil_dir, Vec3::Z);
+
+        // Target faces opposite to recoil direction so falling backward falls along recoil_dir (+Z)
+        let face = -recoil_dir;
+        let rot = Quat::from_rotation_arc(Vec3::NEG_Z, face);
+        let forward = rot * Vec3::NEG_Z;
+        assert!((forward - face).length() < 1e-5);
+    }
+
+    #[test]
+    fn test_crowd_separation_overlapping_enemies_push_apart() {
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        let crowd = vec![
+            (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (e2, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
+        ];
+
+        let force1 = compute_crowd_separation(e1, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        let force2 = compute_crowd_separation(e2, crowd[1].1, crowd[1].2, 0.0, &crowd);
+
+        // Both enemies should push apart horizontally in opposite directions
+        assert!(force1.x < -0.5, "e1 should be pushed in -X direction away from e2");
+        assert!(force2.x > 0.5, "e2 should be pushed in +X direction away from e1");
+        assert_eq!(force1.y, 0.0);
+        assert_eq!(force2.y, 0.0);
+        assert!((force1.x + force2.x).abs() < 1e-4, "Equal mass enemies push with equal and opposite force");
+    }
+
+    #[test]
+    fn test_crowd_separation_mass_hierarchy_brute_pushes_standard() {
+        let brute = Entity::from_raw(1);
+        let grunt = Entity::from_raw(2);
+        let crowd = vec![
+            (brute, Vec3::new(0.0, 0.0, 0.0), NetKind::Brute),
+            (grunt, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
+        ];
+
+        let force_brute = compute_crowd_separation(brute, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        let force_grunt = compute_crowd_separation(grunt, crowd[1].1, crowd[1].2, 0.0, &crowd);
+
+        // Brute has higher mass: remains unaffected by lighter standard zombie
+        assert_eq!(force_brute, Vec3::ZERO, "Brute should be unaffected by lighter standard zombie");
+
+        // Grunt is strongly pushed away (+X)
+        assert!(force_grunt.x > 1.0, "Grunt should be pushed away from brute");
+
+        // Compare against grunt vs grunt at same distance: brute pushes grunt much harder
+        let two_grunts = vec![
+            (Entity::from_raw(3), Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (grunt, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
+        ];
+        let force_grunt_vs_grunt = compute_crowd_separation(grunt, two_grunts[1].1, two_grunts[1].2, 0.0, &two_grunts);
+        assert!(force_grunt.x > force_grunt_vs_grunt.x * 2.0, "Brute's mass hierarchy should significantly amplify push on grunt");
+    }
+
+    #[test]
+    fn test_crowd_separation_boss_pushes_brute_and_boss_hierarchy() {
+        let boss = Entity::from_raw(1);
+        let brute = Entity::from_raw(2);
+        let crowd = vec![
+            (boss, Vec3::new(0.0, 0.0, 0.0), NetKind::Boss(1)),
+            (brute, Vec3::new(0.6, 0.0, 0.0), NetKind::Brute),
+        ];
+
+        let force_boss = compute_crowd_separation(boss, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        let force_brute = compute_crowd_separation(brute, crowd[1].1, crowd[1].2, 0.0, &crowd);
+
+        // Boss (mass 8.0) is unaffected by Brute (mass 3.5)
+        assert_eq!(force_boss, Vec3::ZERO, "Boss should remain unaffected by Brute");
+        // Brute is pushed away from Boss
+        assert!(force_brute.x > 0.0, "Brute should be pushed away from Boss");
+    }
+
+    #[test]
+    fn test_crowd_separation_non_overlapping_enemies_no_push() {
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        // Standard grunt mutual radius is 0.45 + 0.45 = 0.90m. At 2.0m, no separation.
+        let crowd = vec![
+            (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (e2, Vec3::new(2.0, 0.0, 0.0), NetKind::Grunt),
+        ];
+
+        let force1 = compute_crowd_separation(e1, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        let force2 = compute_crowd_separation(e2, crowd[1].1, crowd[1].2, 0.0, &crowd);
+
+        assert_eq!(force1, Vec3::ZERO);
+        assert_eq!(force2, Vec3::ZERO);
+    }
+
+    #[test]
+    fn test_crowd_separation_force_clamping_prevents_jitter() {
+        let center = Entity::from_raw(100);
+        let mut crowd = vec![(center, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt)];
+
+        // Crowd 25 grunts on one side all pressing against center
+        for i in 1..=25 {
+            crowd.push((
+                Entity::from_raw(i),
+                Vec3::new(0.1 + (i as f32) * 0.01, 0.0, 0.0),
+                NetKind::Grunt,
+            ));
+        }
+
+        let force = compute_crowd_separation(center, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        assert!(
+            force.length() <= MAX_SEPARATION_FORCE + 1e-4,
+            "Separation force should be clamped to MAX_SEPARATION_FORCE ({}), got {}",
+            MAX_SEPARATION_FORCE,
+            force.length()
+        );
+        assert!(force.x < 0.0, "Force should push away from the horde");
+    }
+
+    #[test]
+    fn test_move_enemies_accumulates_separation_velocity() {
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        let crowd = vec![
+            (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (e2, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
+        ];
+
+        let mut vel = Vec3::new(2.0, 0.0, 0.0);
+        move_enemies(e1, crowd[0].1, crowd[0].2, 0.0, &mut vel, &crowd);
+
+        // e2 is in +X direction, so repulsive push pushes e1 in -X, reducing velocity
+        assert!(vel.x < 2.0);
+    }
+
+    #[test]
+    fn test_crowd_spatial_grid_matches_direct() {
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        let e3 = Entity::from_raw(3);
+        let crowd = vec![
+            (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (e2, Vec3::new(0.4, 0.0, 0.0), NetKind::Grunt),
+            (e3, Vec3::new(10.0, 0.0, 10.0), NetKind::Brute), // Far away
+        ];
+
+        let mut grid = CrowdSpatialGrid::new(2.5, crowd.len());
+        for (i, &(_, p, _)) in crowd.iter().enumerate() {
+            grid.insert(i, p);
+        }
+
+        let direct_force = compute_crowd_separation(e1, crowd[0].1, crowd[0].2, 0.0, &crowd);
+        let grid_force = compute_crowd_separation_grid(e1, crowd[0].1, crowd[0].2, 0.0, &crowd, &grid);
+
+        assert!(
+            (direct_force - grid_force).length() < 1e-4,
+            "Spatial grid force {:?} should match direct calculation {:?}",
+            grid_force,
+            direct_force
+        );
+    }
+
+    fn setup_projectile_app() -> App {
+        use bevy::time::TimeUpdateStrategy;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(50)));
+        app.init_resource::<Roster>();
+        app.init_resource::<LastHurt>();
+        app.init_resource::<FxQueue>();
+        app.init_resource::<FxOutbox>();
+        app.add_systems(Update, projectiles);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn test_projectile_gravity_curves_velocity_downward() {
+        let mut app = setup_projectile_app();
+        let shot = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 10.0, 0.0),
+            FireballBrain::new(Vec3::new(10.0, 0.0, 0.0), 4.0, 20.0),
+        )).id();
+
+        // 1 tick: dt = 0.05
+        app.update();
+
+        let brain = app.world().get::<FireballBrain>(shot).unwrap();
+        let tf = *app.world().get::<Transform>(shot).unwrap();
+
+        // Gravity: PROJECTILE_GRAVITY * dt = 4.0 * 0.05 = 0.2 downward
+        assert!((brain.velocity.y - (-0.2)).abs() < 1e-4);
+        assert!((brain.velocity.x - 10.0).abs() < 1e-4);
+        assert!(tf.translation.y < 10.0);
+        assert!((tf.translation.x - 0.5).abs() < 1e-4);
+
+        // Run 10 more ticks (0.5s total): velocity curves downward further
+        for _ in 0..10 {
+            app.update();
+        }
+        let brain = app.world().get::<FireballBrain>(shot).unwrap();
+        // 11 ticks * 0.05 = 0.55s => vel.y = -4.0 * 0.55 = -2.2
+        assert!((brain.velocity.y - (-2.2)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_projectile_ground_collision_and_splash_physics() {
+        let mut app = setup_projectile_app();
+
+        // Spawn a player within splash radius (< 2.2m)
+        let mut roster = app.world_mut().resource_mut::<Roster>();
+        let mut player = PlayerInfo::new(1, "Player1".to_string(), crate::Character::Bulwark, 0);
+        player.pos = [1.0, 0.0, 0.0];
+        player.health = 100.0;
+        let initial_health = player.health;
+        let initial_pos = player.feet();
+        roster.0.insert(player.id, player);
+
+        // Spawn a distant player outside splash radius (> 2.2m)
+        let mut far_player = PlayerInfo::new(2, "Player2".to_string(), crate::Character::Bulwark, 0);
+        far_player.pos = [10.0, 0.0, 0.0];
+        far_player.health = 100.0;
+        roster.0.insert(far_player.id, far_player);
+
+        // Projectile positioned just above ground, moving downward to penetrate pos.y < 0.0
+        let shot = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            FireballBrain::new(Vec3::new(0.0, -2.0, 0.0), 4.0, 30.0),
+        )).id();
+
+        app.update();
+
+        // Entity must be cleanly despawned on impact
+        assert!(app.world().get_entity(shot).is_err() || app.world().get::<FireballBrain>(shot).is_none());
+
+        // Explosion effect emitted
+        let fx = app.world().resource::<FxQueue>();
+        let had_explosion = fx.0.iter().any(|f| matches!(f, Fx::Explosion { radius, .. } if (*radius - 2.0).abs() < 1e-4));
+        assert!(had_explosion, "Ground impact must emit Fx::Explosion with radius 2.0");
+
+        // Player within blast radius takes splash damage (30.0 * 0.6 = 18.0) and knockback
+        let roster = app.world().resource::<Roster>();
+        let p1 = roster.0.get(&1).unwrap();
+        assert!((p1.health - (initial_health - 18.0)).abs() < 1e-3, "Player within blast radius takes 0.6x splash damage");
+        assert!(p1.feet() != initial_pos, "Player within blast radius must receive knockback");
+        assert!(p1.feet().x > initial_pos.x, "Blast knockback pushes player away from ground blast origin");
+
+        // Far player unharmed and unpushed
+        let p2 = roster.0.get(&2).unwrap();
+        assert_eq!(p2.health, 100.0);
+        assert_eq!(p2.feet(), Vec3::new(10.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_projectile_wall_collider_collision_and_splash() {
+        let mut app = setup_projectile_app();
+
+        // Spawn a box collider representing a wall/crate
+        app.world_mut().spawn((
+            Transform::from_xyz(5.0, 2.0, 0.0),
+            Collider { half: Vec3::new(1.0, 1.0, 1.0) },
+        ));
+
+        // Spawn a projectile flying directly into the collider
+        let shot = app.world_mut().spawn((
+            Transform::from_xyz(4.5, 2.0, 0.0),
+            FireballBrain::new(Vec3::new(10.0, 0.0, 0.0), 4.0, 25.0),
+        )).id();
+
+        app.update();
+
+        // Entity despawns on wall collision
+        assert!(app.world().get_entity(shot).is_err() || app.world().get::<FireballBrain>(shot).is_none());
+
+        let fx = app.world().resource::<FxQueue>();
+        let had_explosion = fx.0.iter().any(|f| matches!(f, Fx::Explosion { radius, .. } if (*radius - 2.0).abs() < 1e-4));
+        assert!(had_explosion, "Wall impact must emit Fx::Explosion");
+    }
+
+    #[test]
+    fn test_projectile_player_direct_hit_and_splash_bystander() {
+        let mut app = setup_projectile_app();
+
+        let mut roster = app.world_mut().resource_mut::<Roster>();
+        // Target player right at (2.0, 0.0, 0.0) -> chest height at y=1.0
+        let mut p_target = PlayerInfo::new(1, "Target".to_string(), crate::Character::Bulwark, 0);
+        p_target.pos = [2.0, 0.0, 0.0];
+        p_target.health = 100.0;
+        let initial_target_pos = p_target.feet();
+        roster.0.insert(p_target.id, p_target);
+
+        // Nearby bystander at (2.8, 0.0, 0.0) - within 2.2m of hit
+        let mut p_bystander = PlayerInfo::new(2, "Bystander".to_string(), crate::Character::Bulwark, 0);
+        p_bystander.pos = [2.8, 0.0, 0.0];
+        p_bystander.health = 100.0;
+        let initial_bystander_pos = p_bystander.feet();
+        roster.0.insert(p_bystander.id, p_bystander);
+
+        // Projectile hitting target player at chest height
+        let shot = app.world_mut().spawn((
+            Transform::from_xyz(2.0, 1.0, 0.0),
+            FireballBrain::new(Vec3::ZERO, 4.0, 40.0),
+        )).id();
+
+        app.update();
+
+        // Projectile despawned
+        assert!(app.world().get_entity(shot).is_err() || app.world().get::<FireballBrain>(shot).is_none());
+
+        let roster = app.world().resource::<Roster>();
+        let target = roster.0.get(&1).unwrap();
+        let bystander = roster.0.get(&2).unwrap();
+
+        // Target took direct hit damage (40.0)
+        assert_eq!(target.health, 60.0);
+        assert!(target.feet() != initial_target_pos);
+
+        // Bystander took splash damage (40.0 * 0.6 = 24.0)
+        assert_eq!(bystander.health, 76.0);
+        assert!(bystander.feet() != initial_bystander_pos);
+    }
+
+    #[test]
+    fn test_penetrated_bullet_deals_attenuated_damage() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Session::default());
+        app.insert_resource(MatchState::new(0));
+        let mut roster = Roster::default();
+        let mut player = PlayerInfo::new(0, "Shooter".to_string(), crate::Character::Bulwark, 0);
+        player.guns[0] = Some(0);
+        roster.0.insert(0, player);
+        app.insert_resource(roster);
+        app.insert_resource(ShotQueue::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, resolve_shots);
+
+        // Spawn thin obstacle at z = 2.0 (0.2m thick)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 1.0, 2.0),
+            Collider {
+                half: Vec3::new(2.0, 1.0, 0.1),
+            },
+        ));
+
+        // Spawn enemy behind thin obstacle at z = 4.0
+        let enemy = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 4.0),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: 100.0,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 100.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 0.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+            },
+        )).id();
+
+        // Push shot aimed straight at the enemy through the wall
+        let mut shots = app.world_mut().resource_mut::<ShotQueue>();
+        shots.0.push((
+            0,
+            crate::Shot {
+                origin: [0.0, 1.0, 0.0],
+                dir: [0.0, 0.0, 1.0],
+                gun: 0,
+                alt: false,
+            },
+        ));
+
+        app.update();
+
+        let dmg_queue = app.world().resource::<DamageQueue>();
+        assert_eq!(dmg_queue.0.len(), 1);
+        let dmg = &dmg_queue.0[0];
+        assert_eq!(dmg.target, enemy);
+        let def = crate::data::gun_def(0);
+        let expected_unattenuated = def.damage;
+        let expected_attenuated = expected_unattenuated * crate::physics::PENETRATION_DAMAGE_FACTOR;
+        assert!(
+            (dmg.amount - expected_attenuated).abs() < 1e-3,
+            "Damage ({}) should equal attenuated ({})",
+            dmg.amount,
+            expected_attenuated
+        );
+    }
+}
+

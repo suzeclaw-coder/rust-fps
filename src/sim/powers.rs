@@ -13,7 +13,10 @@ use super::{
 use crate::abilities::{move_time, DASH_SPEED, GRAPPLE_RANGE};
 use crate::data::{elements_in, Ability, Element};
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
-use crate::physics::{collect_boxes, line_of_sight, ray_world, Boxes};
+use crate::physics::{
+    collect_boxes, ground_height, line_of_sight, ray_world, ray_world_normal, resolve_collisions,
+    Boxes,
+};
 use crate::{Collider, MatchState, NetKind, Replicated, Roster};
 
 /// Projectile and gadget looks (`NetKind::Missile`).
@@ -298,6 +301,7 @@ impl World<'_, '_, '_> {
             elements,
             chained: false,
             stun,
+            knockback: Vec3::ZERO,
         });
     }
 
@@ -954,6 +958,7 @@ fn event(target: Entity, amount: f32, from: u8, elements: u8, stun: f32) -> Dama
         elements,
         chained: false,
         stun,
+        knockback: Vec3::ZERO,
     }
 }
 
@@ -1213,16 +1218,68 @@ pub(super) fn grenades(
             }
         } else if !g.landed {
             g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
-            let next = tf.translation + g.velocity * dt;
-            if next.y < 0.1 {
-                tf.translation.y = 0.1;
-                g.landed = true;
-            } else if !line_of_sight(tf.translation, next, &boxes) {
-                // Sticky bombs cling to walls; the rest drop off them.
+            let current_pos = tf.translation;
+            let next = current_pos + g.velocity * dt;
+            let floor_y = ground_height(next, 0.2, next.y, &boxes);
+            let contact_y = floor_y + 0.1;
+
+            if next.y <= contact_y {
+                tf.translation = Vec3::new(next.x, contact_y, next.z);
+                resolve_collisions(&mut tf.translation, 0.15, floor_y, &boxes);
                 if g.kind == Nade::Sticky {
+                    g.velocity = Vec3::ZERO;
+                    g.landed = true;
+                } else if g.velocity.y < -1.5 {
+                    // Significant vertical speed: invert and dampen with restitution
+                    g.velocity.y = -g.velocity.y * 0.45;
+                    // Apply ground friction to horizontal velocity
+                    g.velocity.x *= 0.65;
+                    g.velocity.z *= 0.65;
+                } else {
+                    // Rolling / sliding on floor
+                    g.velocity.y = 0.0;
+                    g.velocity.x *= 0.65;
+                    g.velocity.z *= 0.65;
+                    if g.velocity.length() < 0.5 {
+                        g.velocity = Vec3::ZERO;
+                        g.landed = true;
+                    }
+                }
+            } else if !line_of_sight(current_pos, next, &boxes) {
+                if g.kind == Nade::Sticky {
+                    g.velocity = Vec3::ZERO;
                     g.landed = true;
                 } else {
-                    g.velocity = Vec3::new(-g.velocity.x * 0.2, g.velocity.y.min(0.0), -g.velocity.z * 0.2);
+                    let disp = next - current_pos;
+                    let dist = disp.length();
+                    let hit = if dist > 1e-4 {
+                        ray_world_normal(current_pos, disp / dist, dist, &boxes)
+                    } else {
+                        None
+                    };
+                    if let Some((hit_dist, normal)) = hit {
+                        tf.translation = current_pos + (disp / dist) * (hit_dist - 0.04).max(0.0);
+                        let n = normal.normalize();
+                        let v_dot_n = g.velocity.dot(n);
+                        if v_dot_n < 0.0 {
+                            let v_normal = n * v_dot_n;
+                            let v_tangent = g.velocity - v_normal;
+                            let restitution = if n.y > 0.7 { 0.45 } else { 0.55 };
+                            let friction = if n.y > 0.7 { 0.65 } else { 0.85 };
+                            g.velocity = v_tangent * friction - v_normal * restitution;
+                        } else {
+                            g.velocity = Vec3::new(-g.velocity.x * 0.55, g.velocity.y * 0.85, -g.velocity.z * 0.55);
+                        }
+                    } else {
+                        // Fallback horizontal reflection
+                        if (next.x - current_pos.x).abs() > (next.z - current_pos.z).abs() {
+                            g.velocity.x = -g.velocity.x * 0.55;
+                            g.velocity.z *= 0.85;
+                        } else {
+                            g.velocity.z = -g.velocity.z * 0.55;
+                            g.velocity.x *= 0.85;
+                        }
+                    }
                 }
             } else {
                 tf.translation = next;
@@ -1239,7 +1296,7 @@ pub(super) fn grenades(
             }
         }
         let at = tf.translation;
-        let ground = at.with_y(0.0);
+        let ground = at.with_y(ground_height(at, 0.2, at.y, &boxes));
         match g.kind {
             Nade::Sticky => {
                 if g.fuse > 0.0 {
@@ -1544,5 +1601,175 @@ pub(super) fn turrets(
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bevy::time::TimeUpdateStrategy;
+
+    fn setup_grenade_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(50)));
+        app.init_resource::<Zones>();
+        app.init_resource::<DamageQueue>();
+        app.init_resource::<FxQueue>();
+        app.init_resource::<FxOutbox>();
+        app.init_resource::<Roster>();
+        app.add_systems(Update, grenades);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn test_grenade_restitution_bounce_on_floor() {
+        let mut app = setup_grenade_app();
+        let nade = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.2, 0.0),
+            GrenadeBrain::new(
+                0,
+                Vec3::new(4.0, -10.0, 2.0),
+                3.0,
+                50.0,
+                3.0,
+                0,
+                Nade::Heal,
+            ),
+        )).id();
+
+        app.update();
+
+        let tf = *app.world().get::<Transform>(nade).unwrap();
+        let g = app.world().get::<GrenadeBrain>(nade).unwrap();
+        assert!((tf.translation.y - 0.1).abs() < 1e-4);
+        assert!(!g.landed);
+        // Vertical speed inverted with restitution (~0.45):
+        assert!(g.velocity.y > 0.0);
+        // Horizontal velocity dampened with friction (~0.65):
+        assert!(g.velocity.x < 4.0);
+        assert!(g.velocity.z < 2.0);
+    }
+
+    #[test]
+    fn test_grenade_resting_threshold() {
+        let mut app = setup_grenade_app();
+        let nade = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.11, 0.0),
+            GrenadeBrain::new(
+                0,
+                Vec3::new(0.3, -0.5, 0.2), // speed < 0.5, vertical speed > -1.5
+                3.0,
+                50.0,
+                3.0,
+                0,
+                Nade::Sticky,
+            ),
+        )).id();
+
+        app.update();
+
+        let tf = *app.world().get::<Transform>(nade).unwrap();
+        let g = app.world().get::<GrenadeBrain>(nade).unwrap();
+        assert!((tf.translation.y - 0.1).abs() < 1e-4);
+        assert!(g.landed);
+        assert_eq!(g.velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn test_grenade_lands_on_elevated_crate() {
+        let mut app = setup_grenade_app();
+        // Crate centered at (0.0, 1.0, 0.0) with half (2.0, 1.0, 2.0) -> top at y = 2.0
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            Collider { half: Vec3::new(2.0, 1.0, 2.0) },
+        ));
+
+        // Grenade falling towards crate top
+        let nade = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 2.15, 0.0),
+            GrenadeBrain::new(
+                0,
+                Vec3::new(0.2, -0.5, 0.1),
+                3.0,
+                50.0,
+                3.0,
+                0,
+                Nade::Trap,
+            ),
+        )).id();
+
+        app.update();
+
+        // The grenade lands on the crate top (2.0 + 0.1 = 2.1) and becomes an armed MineBrain
+        let tf = *app.world().get::<Transform>(nade).unwrap();
+        assert!((tf.translation.y - 2.0).abs() < 1e-4 || (tf.translation.y - 2.1).abs() < 1e-4);
+        assert!(app.world().get::<MineBrain>(nade).is_some());
+    }
+
+    #[test]
+    fn test_grenade_wall_reflection_banks_corner() {
+        let mut app = setup_grenade_app();
+        // Wall at x = 5.0 (center 5.5, half 0.5, 2.0, 10.0) -> surface at x = 5.0, normal is NEG_X
+        app.world_mut().spawn((
+            Transform::from_xyz(5.5, 2.0, 0.0),
+            Collider { half: Vec3::new(0.5, 2.0, 10.0) },
+        ));
+
+        // Grenade moving towards the wall in +X and along it in +Z
+        let nade = app.world_mut().spawn((
+            Transform::from_xyz(4.9, 2.0, 0.0),
+            GrenadeBrain::new(
+                0,
+                Vec3::new(10.0, 0.0, 6.0),
+                3.0,
+                50.0,
+                3.0,
+                0,
+                Nade::Heal,
+            ),
+        )).id();
+
+        app.update();
+
+        let tf = *app.world().get::<Transform>(nade).unwrap();
+        let g = app.world().get::<GrenadeBrain>(nade).unwrap();
+        // It bounced off the wall: x velocity inverted
+        assert!(g.velocity.x < 0.0);
+        // z velocity preserved (banked around the corner)
+        assert!(g.velocity.z > 0.0);
+        assert!(!g.landed);
+        assert!(tf.translation.x <= 5.0);
+    }
+
+    #[test]
+    fn test_sticky_bomb_sticks_without_bouncing() {
+        let mut app = setup_grenade_app();
+        // Wall at x = 5.0
+        app.world_mut().spawn((
+            Transform::from_xyz(5.5, 2.0, 0.0),
+            Collider { half: Vec3::new(0.5, 2.0, 10.0) },
+        ));
+
+        let nade = app.world_mut().spawn((
+            Transform::from_xyz(4.9, 2.0, 0.0),
+            GrenadeBrain::new(
+                0,
+                Vec3::new(10.0, 0.0, 0.0),
+                3.0,
+                50.0,
+                3.0,
+                0,
+                Nade::Sticky,
+            ),
+        )).id();
+
+        app.update();
+
+        let g = app.world().get::<GrenadeBrain>(nade).unwrap();
+        assert!(g.landed);
+        assert_eq!(g.velocity, Vec3::ZERO);
     }
 }

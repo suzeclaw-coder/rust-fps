@@ -4,6 +4,8 @@
 //! effects so every player sees them.
 
 pub mod auras;
+pub mod casings;
+pub mod debris;
 mod spells;
 
 use bevy::pbr::NotShadowCaster;
@@ -37,6 +39,8 @@ impl Plugin for FxPlugin {
                     animate,
                     bullets,
                     particles,
+                    debris::update_debris,
+                    casings::update_shell_casings,
                     spells::fall,
                     spells::warns,
                     spells::twirls,
@@ -186,6 +190,8 @@ pub struct FxAssets {
     blood_mist: Handle<StandardMaterial>,
     flesh: Handle<StandardMaterial>,
     bone: Handle<StandardMaterial>,
+    casing_mesh: Handle<Mesh>,
+    casing_mat: Handle<StandardMaterial>,
 }
 
 /// A jagged lightning bolt from `from` to `to`, made of glowing segments.
@@ -450,6 +456,8 @@ fn setup(
             reflectance: 0.35,
             ..default()
         }),
+        casing_mesh: meshes.add(casings::casing_mesh()),
+        casing_mat: materials.add(casings::casing_material()),
     };
     commands.insert_resource(assets);
 }
@@ -617,28 +625,16 @@ fn explosion(
             },
         );
     }
-    for _ in 0..12 {
-        let d = rand_dir(&mut rng);
-        let v = Vec3::new(d.x * 6.0, rng.gen_range(5.0..11.0), d.z * 6.0);
-        let s = rng.gen_range(0.07..0.16);
-        particle(
-            commands,
-            &a.cube,
-            &a.debris,
-            pos,
-            Particle {
-                vel: v,
-                life: rng.gen_range(1.2..2.0),
-                max: 2.0,
-                gravity: 18.0,
-                drag: 0.2,
-                size: (s, s),
-                pop: 0.0,
-                spin: rand_dir(&mut rng) * 10.0,
-                lands: true,
-            },
-        );
-    }
+    let debris_count = rng.gen_range(6..=12);
+    debris::spawn_explosion_debris(
+        commands,
+        pos,
+        radius,
+        debris_count,
+        color,
+        a.cube.clone(),
+        a.debris.clone(),
+    );
     for _ in 0..14 {
         let d = rand_dir(&mut rng);
         particle(
@@ -1076,6 +1072,7 @@ pub fn play(
     let mut rng = rand::thread_rng();
     let a = &*assets;
     let sa = &*spell_assets;
+    let mut casing_origins: Vec<Vec3> = Vec::new();
     for fx in queue.0.drain(..) {
         match fx {
             Fx::Tracer { a: from, b: to, .. } => {
@@ -1096,6 +1093,17 @@ pub fn play(
                     Transform::from_translation(from).with_scale(Vec3::ZERO),
                     NotShadowCaster,
                 ));
+                let shot_dir = (to - from).normalize_or(Vec3::Z);
+                if !casing_origins.iter().any(|&prev| prev.distance_squared(from) < 0.04 * 0.04) {
+                    casing_origins.push(from);
+                    casings::spawn_shell_casing(
+                        &mut commands,
+                        from,
+                        shot_dir,
+                        a.casing_mesh.clone(),
+                        a.casing_mat.clone(),
+                    );
+                }
             }
             Fx::Explosion { pos, radius, color } => {
                 explosion(

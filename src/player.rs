@@ -9,7 +9,10 @@ use crate::config::{Action, InputExt, Settings};
 use crate::data::{has_perk, Perk, Stat};
 use crate::game::Paused;
 use crate::maps::{player_spawn, CurrentMap};
-use crate::physics::{collect_boxes, ground_height, resolve_collisions};
+use crate::physics::{
+    collect_boxes, ground_height, has_overhead_clearance, resolve_collisions_with_step,
+    MAX_STEP_HEIGHT,
+};
 use crate::{
     cursor_locked, AppState, Collider, MatchState, Phase, Roster, Session, CROUCH_EYE_HEIGHT,
     EYE_HEIGHT, PLAYER_RADIUS,
@@ -80,6 +83,12 @@ pub struct LocalPlayer {
     pub last_air: f32,
     /// Time left on a jump press waiting for you to land.
     jump_buffer: f32,
+    /// Active vault/mantle time remaining (smooth pull onto ledge).
+    pub mantle_time: f32,
+    /// Cooldown timer before next mantle can trigger.
+    pub mantle_cd: f32,
+    /// Target Y height of the ledge currently being mantled.
+    pub mantle_target_y: f32,
     /// The emote playing: (which, seconds left).
     pub emote: Option<(u8, f32)>,
     /// Bumped each time an emote starts (so repeats restart for others).
@@ -141,6 +150,9 @@ pub fn spawn_camera(mut commands: Commands) {
             ground_time: 0.0,
             last_air: 0.0,
             jump_buffer: 0.0,
+            mantle_time: 0.0,
+            mantle_cd: 0.0,
+            mantle_target_y: 0.0,
             emote: None,
             emote_seq: 0,
             cam_out: 0.0,
@@ -163,6 +175,9 @@ fn reset_camera(mut player: Single<(&mut Transform, &mut LocalPlayer)>) {
     p.vel = Vec3::ZERO;
     p.sliding = 0.0;
     p.dash_time = 0.0;
+    p.mantle_time = 0.0;
+    p.mantle_cd = 0.0;
+    p.mantle_target_y = 0.0;
     p.air_time = 0.0;
     p.last_air = 0.0;
     p.roll = 0.0;
@@ -332,6 +347,10 @@ pub fn movement(
     let wish = wish.normalize_or_zero();
 
     p.slide_cd -= dt;
+    p.mantle_cd -= dt;
+    if p.on_ground {
+        p.mantle_time = 0.0;
+    }
     let crouch_held = held(Action::Crouch);
     let speed = p.horizontal_speed();
 
@@ -437,6 +456,59 @@ pub fn movement(
         p.vel = v;
     }
 
+    // Ledge Mantle / Vault: when airborne and moving forward or holding jump towards a reachable ledge
+    let jump_held = held(Action::Jump) || tapped(Action::Jump) || p.jump_buffer > 0.0;
+    let forward_held = held(Action::Forward) || wish.dot(forward) > 0.3;
+    let want_mantle = jump_held || forward_held;
+
+    if !p.on_ground && alive && active && p.dash_time <= 0.0 && want_mantle && p.mantle_cd <= 0.0 {
+        let mut best_ledge: Option<(f32, Vec2)> = None;
+        let mut min_dist = f32::MAX;
+        for (center, half) in &boxes {
+            let top = center.y + half.y;
+            let diff = top - p.feet.y;
+            // Reachable height: 0.35m to 1.2m above feet
+            if diff < 0.35 || diff > 1.20 {
+                continue;
+            }
+            let px = p.feet.x;
+            let pz = p.feet.z;
+            let cx = px.clamp(center.x - half.x, center.x + half.x);
+            let cz = pz.clamp(center.z - half.z, center.z + half.z);
+            let to_box = Vec2::new(cx - px, cz - pz);
+            let dist = to_box.length();
+            if dist > PLAYER_RADIUS + 0.45 {
+                continue;
+            }
+            let forward_2d = Vec2::new(forward.x, forward.z).normalize_or_zero();
+            if dist > 1e-3 && (to_box / dist).dot(forward_2d) < 0.35 {
+                continue;
+            }
+            let target_xz = Vec2::new(cx, cz) + forward_2d * (PLAYER_RADIUS * 0.5);
+            if !has_overhead_clearance(target_xz, PLAYER_RADIUS, top, &boxes) {
+                continue;
+            }
+            if dist < min_dist {
+                min_dist = dist;
+                best_ledge = Some((top, target_xz));
+            }
+        }
+        if let Some((top, _target_xz)) = best_ledge {
+            p.vel.y = p.vel.y.max(4.5);
+            p.mantle_time = 0.28;
+            p.mantle_cd = 0.45;
+            p.mantle_target_y = top;
+        }
+    }
+
+    if p.mantle_time > 0.0 {
+        p.mantle_time -= dt;
+        let forward_speed = p.vel.dot(forward);
+        let target_forward = 4.5f32.max(forward_speed);
+        let pull_accel = (target_forward - forward_speed).max(0.0) * (18.0 * dt).min(1.0);
+        p.vel += forward * pull_accel;
+    }
+
     // Cap horizontal speed.
     let h = p.vel.with_y(0.0);
     if h.length() > MAX_SPEED {
@@ -447,8 +519,29 @@ pub fn movement(
     p.vel.y -= GRAVITY * dt;
     let before = p.feet + p.vel * dt;
     let mut feet = before;
-    let feet_y = feet.y;
-    resolve_collisions(&mut feet, PLAYER_RADIUS, feet_y, &boxes);
+
+    // Crouch-jump mechanics: tuck legs upward by ~0.4m when airborne crouched.
+    // Also tuck legs during ledge mantling so the player vaults cleanly over the ledge rim.
+    let mantle_raise = if p.mantle_time > 0.0 {
+        (p.mantle_target_y - feet.y + 0.05).clamp(0.0, 0.45)
+    } else {
+        0.0
+    };
+    let effective_feet_y = if !p.on_ground && p.crouching {
+        (feet.y + 0.40).max(feet.y + mantle_raise)
+    } else {
+        feet.y + mantle_raise
+    };
+
+    let max_step = if p.on_ground { MAX_STEP_HEIGHT } else { 0.0 };
+    let stepped_ground = if p.on_ground {
+        resolve_collisions_with_step(&mut feet, PLAYER_RADIUS, effective_feet_y, max_step, &boxes)
+    } else {
+        resolve_collisions_with_step(&mut feet, PLAYER_RADIUS, effective_feet_y, 0.0, &boxes);
+        feet.y = before.y;
+        0.0
+    };
+
     // Stop moving into walls we bumped (keeps sliding along them smooth).
     let push = (feet - before).with_y(0.0);
     if push.length_squared() > 1e-8 {
@@ -459,13 +552,25 @@ pub fn movement(
             p.vel = v;
         }
     }
-    let ground = ground_height(feet, PLAYER_RADIUS, feet.y, &boxes);
+    let ground = ground_height(feet, PLAYER_RADIUS, effective_feet_y, &boxes).max(stepped_ground);
     if feet.y <= ground {
-        feet.y = ground;
+        if p.on_ground && ground > p.feet.y && ground - p.feet.y <= MAX_STEP_HEIGHT + 0.05 {
+            // Smoothly elevate p.feet.y onto the step so moving over low curbs,
+            // stairs, and small crates feels seamless and fluid like the Source/Quake engine.
+            let diff = ground - p.feet.y;
+            let step_speed = (diff * 25.0).max(8.0);
+            feet.y = (p.feet.y + step_speed * dt).min(ground);
+        } else {
+            feet.y = ground;
+        }
         p.vel.y = 0.0;
         p.on_ground = true;
+        p.mantle_time = 0.0;
     } else {
         p.on_ground = feet.y - ground < 0.05 && p.vel.y <= 0.0;
+        if p.on_ground {
+            p.mantle_time = 0.0;
+        }
     }
     p.feet = feet;
     if p.on_ground {
@@ -525,3 +630,200 @@ fn sync_to_roster(session: Res<Session>, mut roster: ResMut<Roster>, player: Sin
         me.emote_seq = player.emote_seq;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::{ground_height, has_overhead_clearance, resolve_collisions_with_step, Boxes};
+
+    fn make_test_player() -> LocalPlayer {
+        LocalPlayer {
+            yaw: 0.0, // facing -Z
+            pitch: 0.0,
+            kick: 0.0,
+            roll: 0.0,
+            feet: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            on_ground: false,
+            crouching: false,
+            sliding: 0.0,
+            slide_cd: 0.0,
+            eye: EYE_HEIGHT,
+            sprinting: false,
+            dash_time: 0.0,
+            dash_dir: Vec3::ZERO,
+            last_spawn_seq: None,
+            air_time: 0.5,
+            ground_time: 0.0,
+            last_air: 0.5,
+            jump_buffer: 0.0,
+            mantle_time: 0.0,
+            mantle_cd: 0.0,
+            mantle_target_y: 0.0,
+            emote: None,
+            emote_seq: 0,
+            cam_out: 0.0,
+            orbit: Vec2::ZERO,
+        }
+    }
+
+    #[test]
+    fn test_crouch_jump_effective_feet_height() {
+        let mut p = make_test_player();
+        p.feet = Vec3::new(0.0, 0.40, 0.0);
+        p.on_ground = false;
+        p.crouching = false;
+
+        // Standing airborne feet
+        let effective_normal = if !p.on_ground && p.crouching {
+            p.feet.y + 0.40
+        } else {
+            p.feet.y
+        };
+        assert_eq!(effective_normal, 0.40);
+
+        // Airborne crouched: tuck legs up by 0.40m
+        p.crouching = true;
+        let effective_crouch = if !p.on_ground && p.crouching {
+            p.feet.y + 0.40
+        } else {
+            p.feet.y
+        };
+        assert_eq!(effective_crouch, 0.80);
+    }
+
+    #[test]
+    fn test_crouch_jump_clears_waist_high_crate() {
+        // Crate at z = -1.5, half-extents (1.0, 0.30, 0.5) -> top = 0.60m, front edge at z = -1.0
+        let boxes: Boxes = vec![(Vec3::new(0.0, 0.30, -1.5), Vec3::new(1.0, 0.30, 0.5))];
+        let radius = PLAYER_RADIUS;
+
+        // Player airborne at feet.y = 0.35m, moving forward into the crate at z = -0.8
+        let mut feet_standing = Vec3::new(0.0, 0.35, -0.8);
+        let eff_standing = feet_standing.y; // 0.35m
+
+        // Without crouch-jump, top (0.60) is higher than eff_standing (0.35), so collision pushes player back
+        resolve_collisions_with_step(&mut feet_standing, radius, eff_standing, 0.0, &boxes);
+        assert!(feet_standing.z > -0.8); // pushed back away from z = -1.0
+
+        // With crouch-jump, tucking legs raises effective feet to 0.35 + 0.40 = 0.75m > 0.60m
+        let mut feet_crouched = Vec3::new(0.0, 0.35, -0.8);
+        let eff_crouched = feet_crouched.y + 0.40;
+        resolve_collisions_with_step(&mut feet_crouched, radius, eff_crouched, 0.0, &boxes);
+        // Not pushed back! The tucked legs clear the crate top horizontally
+        assert_eq!(feet_crouched.z, -0.8);
+
+        // Moving above the crate detects the crate top for landing
+        let over_crate = Vec3::new(0.0, 0.35, -1.3);
+        let ground = ground_height(over_crate, radius, eff_crouched, &boxes);
+        assert_eq!(ground, 0.60);
+    }
+
+    #[test]
+    fn test_ledge_mantle_detection_and_impulse() {
+        // Crate in front at z = -1.0, half (1.0, 0.45, 0.5) -> top = 0.90m, front face at z = -0.50
+        let boxes: Boxes = vec![(Vec3::new(0.0, 0.45, -1.0), Vec3::new(1.0, 0.45, 0.5))];
+
+        let mut p = make_test_player();
+        p.feet = Vec3::new(0.0, 0.20, -0.05); // near edge: dist to -0.50 is 0.45m (~PLAYER_RADIUS + 0.05)
+        p.vel = Vec3::new(0.0, 1.0, -3.0); // moving forward (-Z)
+        let forward = Vec3::new(0.0, 0.0, -1.0);
+
+        // Check ledge reachability: top is 0.90, diff is 0.70m (within 0.35m..1.20m)
+        let mut best_ledge: Option<(f32, Vec2)> = None;
+        let mut min_dist = f32::MAX;
+        for (center, half) in &boxes {
+            let top = center.y + half.y;
+            let diff = top - p.feet.y;
+            if diff < 0.35 || diff > 1.20 {
+                continue;
+            }
+            let px = p.feet.x;
+            let pz = p.feet.z;
+            let cx = px.clamp(center.x - half.x, center.x + half.x);
+            let cz = pz.clamp(center.z - half.z, center.z + half.z);
+            let to_box = Vec2::new(cx - px, cz - pz);
+            let dist = to_box.length();
+            if dist > PLAYER_RADIUS + 0.45 {
+                continue;
+            }
+            let forward_2d = Vec2::new(forward.x, forward.z).normalize_or_zero();
+            if dist > 1e-3 && (to_box / dist).dot(forward_2d) < 0.35 {
+                continue;
+            }
+            let target_xz = Vec2::new(cx, cz) + forward_2d * (PLAYER_RADIUS * 0.5);
+            if !has_overhead_clearance(target_xz, PLAYER_RADIUS, top, &boxes) {
+                continue;
+            }
+            if dist < min_dist {
+                min_dist = dist;
+                best_ledge = Some((top, target_xz));
+            }
+        }
+
+        assert!(best_ledge.is_some());
+        let (top, _) = best_ledge.unwrap();
+        assert_eq!(top, 0.90);
+
+        // Apply mantle impulse
+        p.vel.y = p.vel.y.max(4.5);
+        p.mantle_time = 0.28;
+        p.mantle_cd = 0.45;
+        p.mantle_target_y = top;
+
+        assert_eq!(p.vel.y, 4.5);
+        assert_eq!(p.mantle_time, 0.28);
+        assert_eq!(p.mantle_target_y, 0.90);
+    }
+
+    #[test]
+    fn test_ledge_mantle_blocked_by_overhead_obstacle() {
+        // Crate at z = -1.0 with top = 0.90m, but ceiling beam directly overhead at y = 1.8 (head clearance < 1.8 + 0.9)
+        let boxes: Boxes = vec![
+            (Vec3::new(0.0, 0.45, -1.0), Vec3::new(1.0, 0.45, 0.5)),
+            (Vec3::new(0.0, 2.0, -1.0), Vec3::new(1.0, 0.4, 0.5)), // bottom is 1.6m
+        ];
+
+        let p_feet = Vec3::new(0.0, 0.20, -0.05);
+        let forward = Vec3::new(0.0, 0.0, -1.0);
+        let mut best_ledge: Option<(f32, Vec2)> = None;
+
+        for (center, half) in &boxes {
+            let top = center.y + half.y;
+            let diff = top - p_feet.y;
+            if diff < 0.35 || diff > 1.20 {
+                continue;
+            }
+            let forward_2d = Vec2::new(forward.x, forward.z).normalize_or_zero();
+            let target_xz = Vec2::new(0.0, -0.50) + forward_2d * (PLAYER_RADIUS * 0.5);
+            if !has_overhead_clearance(target_xz, PLAYER_RADIUS, top, &boxes) {
+                continue;
+            }
+            best_ledge = Some((top, target_xz));
+        }
+
+        // Mantle blocked because ceiling beam is overhead
+        assert!(best_ledge.is_none());
+    }
+
+    #[test]
+    fn test_ledge_mantle_ignores_tall_wall() {
+        // Tall wall (height 3.0m, top = 3.0m)
+        let boxes: Boxes = vec![(Vec3::new(0.0, 1.5, -1.0), Vec3::new(1.0, 1.5, 0.5))];
+        let p_feet = Vec3::new(0.0, 0.0, 0.0);
+        let mut best_ledge: Option<(f32, Vec2)> = None;
+
+        for (center, half) in &boxes {
+            let top = center.y + half.y;
+            let diff = top - p_feet.y;
+            if diff < 0.35 || diff > 1.20 {
+                continue;
+            }
+            best_ledge = Some((top, Vec2::ZERO));
+        }
+
+        // Diff 3.0m is well beyond reachable 1.20m mantle threshold, so no ledge is found
+        assert!(best_ledge.is_none());
+    }
+}
+

@@ -654,6 +654,7 @@ pub fn fire(
     }
     let mut any_hit = false;
     let mut head = false;
+    let mut penetrated = false;
     for muzzle in muzzles.iter().flat_map(|m| std::iter::repeat_n(*m, rays as usize)) {
         let a = rng.gen_range(0.0..std::f32::consts::TAU);
         let r = spread * rng.gen_range(0.0f32..1.0).sqrt();
@@ -675,6 +676,7 @@ pub fn fire(
         if let Some((_, h)) = hit.enemy {
             any_hit = true;
             head |= h;
+            penetrated |= hit.penetrated;
         }
         fx.0.push(Fx::Tracer {
             shooter: session.my_id,
@@ -692,7 +694,13 @@ pub fn fire(
         ));
     }
     if any_hit {
-        loadout.hitmarker = if head { 0.20 } else { 0.14 };
+        loadout.hitmarker = if head {
+            0.20
+        } else if penetrated {
+            0.16
+        } else {
+            0.14
+        };
         loadout.headshot = head;
     }
 }
