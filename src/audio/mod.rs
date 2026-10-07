@@ -3,7 +3,10 @@
 //! (louder near you, panned left/right); each belongs to a volume group the
 //! player can turn up or down in Settings > Audio.
 
-mod synth;
+pub mod synth;
+
+#[allow(unused_imports, dead_code)]
+pub use synth::{gain_from_db, pitch_from_cents};
 
 use bevy::audio::{PlaybackMode, SpatialScale, Volume};
 use bevy::prelude::*;
@@ -866,27 +869,6 @@ fn gun_sounds(
         if loadout.shots != *last_shots {
             sounds.here(shot_sound(g.id, g.attach.handling(g.id).quiet));
         }
-        // Reload sounds at points through the reload.
-        if loadout.reload > 0.0 && loadout.reload_total > 0.0 {
-            let k = 1.0 - loadout.reload / loadout.reload_total;
-            let before = 1.0 - *last_reload / loadout.reload_total;
-            let shells = matches!(g.id, 10 | 11 | 12 | 18);
-            let marks: &[(f32, Snd)] = if shells {
-                &[
-                    (0.2, Snd::Shell),
-                    (0.45, Snd::Shell),
-                    (0.7, Snd::Shell),
-                    (0.92, Snd::Bolt),
-                ]
-            } else {
-                &[(0.12, Snd::MagOut), (0.6, Snd::MagIn), (0.88, Snd::Bolt)]
-            };
-            for (at, snd) in marks {
-                if before < *at && k >= *at {
-                    sounds.here(*snd);
-                }
-            }
-        }
         if g.mag == 0 && g.reserve == 0 && mouse.just_pressed(MouseButton::Left) {
             sounds.here(Snd::DryFire);
         }
@@ -1273,5 +1255,49 @@ fn combat_feedback_sounds(
         }
     }
     *prev_ready = Some(current_ready);
+}
+
+// ---------------------------------------------------------------------------
+// Animation sound event polling (inspired by ELDEN-RING-Combat-Rewrite)
+// ---------------------------------------------------------------------------
+
+/// The frame of a clip the sound system should hear. Loops driven by the wall
+/// clock count frames up indefinitely; they are wrapped to the clip's length using `rem_euclid`.
+#[allow(dead_code)]
+pub fn heard_frame(frame: f32, looped: bool, clip_frames: usize) -> f32 {
+    let last = (clip_frames.max(2) - 1) as f32;
+    if looped {
+        frame.rem_euclid(last)
+    } else {
+        frame
+    }
+}
+
+/// Returns events whose frame falls within the playback window between `last` and `current`.
+///
+/// In normal playback (`current >= last`), events in `(last, current]` are triggered.
+/// When `looped` is true and a loop wrap-around occurs (`current < last`), events in the tail
+/// of the loop `(last, f32::INFINITY)` and the head of the loop `(-1.0, current]` are triggered.
+/// When not looped and `current < last` (e.g. animation restarted), events in `(-1.0, current]` fire.
+/// If `last` is `None` (first frame), events in `(current - 1.0, current]` fire.
+#[allow(dead_code)]
+pub fn poll_window<T: Copy>(
+    events: &[(f32, T)],
+    last: Option<f32>,
+    current: f32,
+    looped: bool,
+) -> Vec<T> {
+    let windows: &[(f32, f32)] = &match last {
+        Some(last) if current >= last => [(last, current), (0.0, -1.0)],
+        Some(last) if looped => [(last, f32::INFINITY), (-1.0, current)],
+        // The same action started over, or a new clip.
+        Some(_) => [(-1.0, current), (0.0, -1.0)],
+        None => [(current - 1.0, current), (0.0, -1.0)],
+    };
+    events
+        .iter()
+        .filter(|(f, _)| windows.iter().any(|&(from, to)| *f > from && *f <= to))
+        .map(|&(_, item)| item)
+        .collect()
 }
 

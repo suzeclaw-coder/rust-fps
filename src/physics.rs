@@ -403,6 +403,42 @@ pub fn trace_shot(
     best
 }
 
+/// Shortest distance between the segments a-b and c-d.
+/// Uses the analytical closest-points algorithm between two 3D line segments.
+pub fn segment_distance(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> f32 {
+    let (u, v, w) = (b - a, d - c, a - c);
+    let (uu, uv, vv, uw, vw) = (u.dot(u), u.dot(v), v.dot(v), u.dot(w), v.dot(w));
+    let denom = uu * vv - uv * uv;
+    // Closest point on a-b to the line through c-d, then on c-d to that, then back.
+    let mut s = if denom > 1e-8 {
+        ((uv * vw - vv * uw) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let t = if vv > 1e-8 {
+        ((uv * s + vw) / vv).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if uu > 1e-8 {
+        s = ((uv * t - uw) / uu).clamp(0.0, 1.0);
+    }
+    (a + u * s).distance(c + v * t)
+}
+
+/// Checks whether two capsules defined by base, top, and radius intersect.
+#[allow(dead_code)]
+pub fn capsule_capsule_intersect(
+    cap_a_base: Vec3,
+    cap_a_top: Vec3,
+    radius_a: f32,
+    cap_b_base: Vec3,
+    cap_b_top: Vec3,
+    radius_b: f32,
+) -> bool {
+    segment_distance(cap_a_base, cap_a_top, cap_b_base, cap_b_top) <= radius_a + radius_b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +667,80 @@ mod tests {
         assert!(hit.enemy.is_none(), "Double wall should stop bullet from reaching enemy");
         assert_eq!(hit.penetrated, false, "Bullet blocked by second wall");
         assert!((hit.dist - 3.375).abs() < 1e-4, "Bullet should stop at the second wall front (3.375)");
+    }
+
+    #[test]
+    fn test_segment_distance_intersecting() {
+        // Two segments crossing at (0, 0, 0)
+        let a = Vec3::new(-1.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, -1.0, 0.0);
+        let d = Vec3::new(0.0, 1.0, 0.0);
+        let dist = segment_distance(a, b, c, d);
+        assert!(dist < 1e-5, "Intersecting segments should have distance 0, got {}", dist);
+    }
+
+    #[test]
+    fn test_segment_distance_parallel_overlapping_and_separated() {
+        // Parallel along X, separated by 2 units in Y
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(2.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 2.0, 0.0);
+        let d = Vec3::new(2.0, 2.0, 0.0);
+        let dist = segment_distance(a, b, c, d);
+        assert!((dist - 2.0).abs() < 1e-5, "Parallel segments distance should be 2.0, got {}", dist);
+
+        // Collinear disjoint segments along X
+        let c2 = Vec3::new(3.0, 0.0, 0.0);
+        let d2 = Vec3::new(5.0, 0.0, 0.0);
+        let dist2 = segment_distance(a, b, c2, d2);
+        assert!((dist2 - 1.0).abs() < 1e-5, "Collinear separated segments distance should be 1.0, got {}", dist2);
+    }
+
+    #[test]
+    fn test_segment_distance_perpendicular_skew() {
+        // Skew perpendicular segments: one along X at y=0, z=0; one along Y at x=0, z=3
+        let a = Vec3::new(-2.0, 0.0, 0.0);
+        let b = Vec3::new(2.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, -2.0, 3.0);
+        let d = Vec3::new(0.0, 2.0, 3.0);
+        let dist = segment_distance(a, b, c, d);
+        assert!((dist - 3.0).abs() < 1e-5, "Perpendicular skew segments shortest distance should be 3.0, got {}", dist);
+
+        // Skew perpendicular segments where closest point is an endpoint
+        let c_off = Vec3::new(5.0, 0.0, 3.0);
+        let d_off = Vec3::new(5.0, 4.0, 3.0);
+        let dist_off = segment_distance(a, b, c_off, d_off);
+        // Closest point on AB is (2, 0, 0). Closest point on CD is (5, 0, 3).
+        // Distance is sqrt((5-2)^2 + 0 + 3^2) = sqrt(9 + 9) = sqrt(18) ≈ 4.24264
+        let expected = (3.0_f32.powi(2) + 3.0_f32.powi(2)).sqrt();
+        assert!((dist_off - expected).abs() < 1e-4, "Endpoint clamp distance should be {}, got {}", expected, dist_off);
+    }
+
+    #[test]
+    fn test_capsule_capsule_intersect() {
+        // Capsule A: vertical segment from (0, 0, 0) to (0, 2, 0), radius 0.5
+        let cap_a_base = Vec3::new(0.0, 0.0, 0.0);
+        let cap_a_top = Vec3::new(0.0, 2.0, 0.0);
+        let radius_a = 0.5;
+
+        // Capsule B: vertical segment from (0.8, 0.0, 0.0) to (0.8, 2.0, 0.0), radius 0.5
+        // Distance between axes is 0.8. Sum of radii is 1.0 -> should intersect
+        let cap_b_base = Vec3::new(0.8, 0.0, 0.0);
+        let cap_b_top = Vec3::new(0.8, 2.0, 0.0);
+        let radius_b = 0.5;
+        assert!(capsule_capsule_intersect(cap_a_base, cap_a_top, radius_a, cap_b_base, cap_b_top, radius_b));
+
+        // Capsule C: separated further at x = 1.2 -> distance 1.2 > 1.0 -> no intersection
+        let cap_c_base = Vec3::new(1.2, 0.0, 0.0);
+        let cap_c_top = Vec3::new(1.2, 2.0, 0.0);
+        assert!(!capsule_capsule_intersect(cap_a_base, cap_a_top, radius_a, cap_c_base, cap_c_top, radius_b));
+
+        // Horizontal capsule cutting across vertical capsule (e.g. sword swing through body)
+        let swing_base = Vec3::new(-1.0, 1.0, 0.0);
+        let swing_top = Vec3::new(1.0, 1.0, 0.0);
+        let swing_radius = 0.2;
+        assert!(capsule_capsule_intersect(cap_a_base, cap_a_top, radius_a, swing_base, swing_top, swing_radius));
     }
 }
 

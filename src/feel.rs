@@ -23,6 +23,37 @@ impl Shake {
     }
 }
 
+/// HitStop (Impact Freeze) resource for combat feel and physical impact weight.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct HitStop {
+    pub timer: f32,
+    pub time_scale: f32,
+}
+
+impl HitStop {
+    #[allow(dead_code)]
+    pub fn trigger(&mut self, duration: f32) {
+        self.timer = self.timer.max(duration);
+        self.time_scale = 0.0;
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        if self.timer > 0.0 {
+            self.timer = (self.timer - dt).max(0.0);
+            if self.timer == 0.0 {
+                self.time_scale = 1.0;
+            }
+        } else {
+            self.time_scale = 1.0;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_frozen(&self) -> bool {
+        self.timer > 0.0
+    }
+}
+
 /// Landing dip & spring compression when hitting the ground after jumping or falling.
 #[derive(Resource, Default)]
 pub struct LandingDip {
@@ -67,12 +98,14 @@ pub struct FeelPlugin;
 impl Plugin for FeelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Shake>()
+            .init_resource::<HitStop>()
             .init_resource::<LandingDip>()
             .init_resource::<LowHealthFx>()
             .add_systems(Startup, setup_vignette_assets)
             .add_systems(
                 Update,
                 (
+                    update_hit_stop,
                     shake_sources.before(crate::fx::play),
                     update_low_health,
                     drift,
@@ -97,6 +130,10 @@ impl Plugin for FeelPlugin {
                     .run_if(in_state(AppState::InGame)),
             );
     }
+}
+
+pub fn update_hit_stop(time: Res<Time>, mut hit_stop: ResMut<HitStop>) {
+    hit_stop.update(time.delta_secs());
 }
 
 fn reset_feel(mut shake: ResMut<Shake>, mut fx: ResMut<LowHealthFx>) {
@@ -732,5 +769,55 @@ fn warm_up(
             dir,
             size: 4.0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hit_stop_trigger_and_countdown() {
+        let mut hit_stop = HitStop::default();
+        assert_eq!(hit_stop.timer, 0.0);
+        assert_eq!(hit_stop.time_scale, 0.0);
+        assert!(!hit_stop.is_frozen());
+
+        // Update when not active should maintain time_scale = 1.0
+        hit_stop.update(0.016);
+        assert_eq!(hit_stop.timer, 0.0);
+        assert_eq!(hit_stop.time_scale, 1.0);
+        assert!(!hit_stop.is_frozen());
+
+        // Trigger hit stop
+        hit_stop.trigger(0.1);
+        assert_eq!(hit_stop.timer, 0.1);
+        assert_eq!(hit_stop.time_scale, 0.0);
+        assert!(hit_stop.is_frozen());
+
+        // Partial update: countdown continues and still frozen
+        hit_stop.update(0.04);
+        assert!((hit_stop.timer - 0.06).abs() < 1e-5);
+        assert_eq!(hit_stop.time_scale, 0.0);
+        assert!(hit_stop.is_frozen());
+
+        // Trigger with larger duration extends, smaller does not shorten
+        hit_stop.trigger(0.02);
+        assert!((hit_stop.timer - 0.06).abs() < 1e-5);
+        hit_stop.trigger(0.12);
+        assert_eq!(hit_stop.timer, 0.12);
+
+        // Advance to zero
+        hit_stop.update(0.12);
+        assert_eq!(hit_stop.timer, 0.0);
+        assert_eq!(hit_stop.time_scale, 1.0);
+        assert!(!hit_stop.is_frozen());
+
+        // Overshoot dt clamped to 0.0
+        hit_stop.trigger(0.05);
+        hit_stop.update(0.10);
+        assert_eq!(hit_stop.timer, 0.0);
+        assert_eq!(hit_stop.time_scale, 1.0);
+        assert!(!hit_stop.is_frozen());
     }
 }

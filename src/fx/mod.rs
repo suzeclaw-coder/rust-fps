@@ -150,6 +150,11 @@ pub enum Fx {
     Decapitation {
         pos: [f32; 3],
     },
+    /// Metallic/energy sparks emitted on poise break or heavy shield hit.
+    Sparks {
+        pos: [f32; 3],
+        count: u32,
+    },
 }
 
 /// Effects to show on this machine this frame.
@@ -1512,6 +1517,29 @@ pub fn play(
                     Vec3::from_array(pos),
                     &mut rng,
                 );
+            }
+            Fx::Sparks { pos, count } => {
+                let p = Vec3::from_array(pos);
+                for _ in 0..count {
+                    let dir = rand_dir(&mut rng);
+                    particle(
+                        &mut commands,
+                        &a.cube,
+                        &a.spark,
+                        p,
+                        Particle {
+                            vel: dir * rng.gen_range(3.0..8.0) + Vec3::Y * 2.0,
+                            life: 0.35,
+                            max: 0.35,
+                            gravity: 9.8,
+                            drag: 1.0,
+                            size: (0.06, 0.02),
+                            pop: 0.0,
+                            spin: rand_dir(&mut rng) * 10.0,
+                            lands: true,
+                        },
+                    );
+                }
             }
         }
     }

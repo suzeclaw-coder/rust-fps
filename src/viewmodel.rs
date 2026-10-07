@@ -8,6 +8,7 @@
 //! The whole rig is drawn at 40% size, closer to the camera. It looks exactly
 //! the same on screen but no longer pokes through walls you stand next to.
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
@@ -42,7 +43,8 @@ impl Plugin for ViewModelPlugin {
                     .in_set(Phase::Present),
             )
             .add_systems(OnEnter(AppState::InGame), |mut a: ResMut<ViewAnim>| {
-                a.shown = None
+                a.shown = None;
+                a.reload_progress = None;
             });
     }
 }
@@ -57,6 +59,38 @@ impl Default for ViewMuzzle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadSound {
+    MagOut,
+    MagIn,
+    BoltRack,
+    Shell,
+}
+
+impl ReloadSound {
+    pub fn snd(self) -> crate::audio::Snd {
+        match self {
+            ReloadSound::MagOut => crate::audio::Snd::MagOut,
+            ReloadSound::MagIn => crate::audio::Snd::MagIn,
+            ReloadSound::BoltRack => crate::audio::Snd::Bolt,
+            ReloadSound::Shell => crate::audio::Snd::Shell,
+        }
+    }
+}
+
+pub const STANDARD_RELOAD_EVENTS: [(f32, ReloadSound); 3] = [
+    (0.35, ReloadSound::MagOut),
+    (0.65, ReloadSound::MagIn),
+    (0.85, ReloadSound::BoltRack),
+];
+
+pub const SHELL_RELOAD_EVENTS: [(f32, ReloadSound); 4] = [
+    (0.20, ReloadSound::Shell),
+    (0.45, ReloadSound::Shell),
+    (0.70, ReloadSound::Shell),
+    (0.92, ReloadSound::BoltRack),
+];
+
 #[derive(Resource, Default)]
 struct ViewAnim {
     shown: Option<(u8, u8, Character, crate::data::Attach)>,
@@ -70,6 +104,7 @@ struct ViewAnim {
     crouch: f32,
     busy: f32,
     glowing: bool,
+    reload_progress: Option<f32>,
     /// Muzzle light: position, on, colour.
     light: (Vec3, bool, Color),
 }
@@ -482,22 +517,28 @@ fn at(pos: Vec3, rot: Quat) -> Transform {
     Transform::from_translation(pos).with_rotation(rot)
 }
 
+#[derive(SystemParam)]
+struct AnimateState<'w> {
+    session: Res<'w, Session>,
+    roster: Res<'w, Roster>,
+    cast: Res<'w, CastState>,
+    auras: Res<'w, crate::auras::Auras>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn animate(
     time: Res<Time>,
     motion: Res<AccumulatedMouseMotion>,
     state: Res<State<AppState>>,
-    session: Res<Session>,
-    roster: Res<Roster>,
+    game: AnimateState,
     loadout: Res<Loadout>,
-    cast: Res<CastState>,
-    auras: Res<crate::auras::Auras>,
     aim: Res<crate::weapons::Aim>,
     guns: Res<GunAssets>,
     rig_assets: Res<RigAssets>,
     mut anim: ResMut<ViewAnim>,
     mut muzzle: ResMut<ViewMuzzle>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut sounds: ResMut<crate::audio::SoundQueue>,
     player: Single<&LocalPlayer>,
     mut parts: ParamSet<(
         Query<(&GunPivot, &mut Transform, &mut Visibility), Without<ViewRoot>>,
@@ -512,7 +553,7 @@ fn animate(
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
-    let me = roster.me(&session);
+    let me = game.roster.me(&game.session);
     let gun = loadout.current().map(|g| g.id);
     let attach = loadout.current().map(|g| g.attach).unwrap_or_default();
     // Hidden while dead, emoting or looking through a scope.
@@ -574,13 +615,13 @@ fn animate(
     let style_of = |slot: u8| ab(slot).style();
     let blade = |slot: u8| style_of(slot) == CastStyle::Sword;
     let anim_len = |slot: u8| if blade(slot) { 0.7 } else { 0.55 };
-    let cast_anim = cast.cast.filter(|(slot, s)| *s < anim_len(*slot));
+    let cast_anim = game.cast.cast.filter(|(slot, s)| *s < anim_len(*slot));
     // Scythe swings use both hands, so the gun goes down.
-    let two_hand = cast_anim.filter(|(slot, _)| cast.aiming.is_none() && blade(*slot));
+    let two_hand = cast_anim.filter(|(slot, _)| game.cast.aiming.is_none() && blade(*slot));
     let stow = two_hand.map_or(0.0, |(_, s)| {
         ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68))
     });
-    let cast_slot = cast.aiming.or(cast_anim.map(|(s, _)| s));
+    let cast_slot = game.cast.aiming.or(cast_anim.map(|(s, _)| s));
     let busy = two_hand.is_none() && cast_slot.is_some_and(|s| style_of(s) != CastStyle::Move);
     anim.busy = approach(anim.busy, if busy { 1.0 } else { 0.0 }, dt * 12.0);
 
@@ -719,6 +760,17 @@ fn animate(
         .map(|p| ramp(p, 0.0, 0.1) * (1.0 - ramp(p, 0.88, 1.0)))
         .unwrap_or(0.0);
     if let Some(p) = reload {
+        let is_shell_fed = rig.single_load || matches!(gun, 10 | 11 | 12 | 18);
+        let track: &[(f32, ReloadSound)] = if is_shell_fed {
+            &SHELL_RELOAD_EVENTS
+        } else {
+            &STANDARD_RELOAD_EVENTS
+        };
+        for event in crate::audio::poll_window(track, anim.reload_progress, p, false) {
+            sounds.here(event.snd());
+        }
+        anim.reload_progress = Some(p);
+
         if rig.single_load {
             let cycles = if gun == 12 { 1.0 } else { 3.0 };
             if (0.12..0.86).contains(&p) {
@@ -743,6 +795,8 @@ fn animate(
                 reload_impulse_rot *= Quat::from_rotation_x(-0.035 * bolt);
             }
         }
+    } else {
+        anim.reload_progress = None;
     }
     pos += reload_impulse_pos;
     rot *= reload_impulse_rot;
@@ -924,7 +978,7 @@ fn animate(
         };
         let mut hand = ready;
         let mut pose = HandPose::Hold;
-        if let Some((_, s)) = cast_anim.filter(|_| cast.aiming.is_none()) {
+        if let Some((_, s)) = cast_anim.filter(|_| game.cast.aiming.is_none()) {
             match style {
                 CastStyle::Throw => {
                     // Wind up, throw, then bring the hand back down.
@@ -1210,7 +1264,8 @@ fn animate(
     }
 
     // Your aura makes your hands and arms glow.
-    let glow = auras
+    let glow = game
+        .auras
         .glow(me.id)
         .map(|(c, k)| LinearRgba::from(c) * k * (0.2 + 0.08 * (t * 7.0).sin()));
     if glow.is_some() || anim.glowing {
@@ -1231,3 +1286,102 @@ fn muzzle_light(
         light.color = anim.light.2;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::poll_window;
+
+    #[test]
+    fn test_standard_reload_normal_steps() {
+        let mut last_progress: Option<f32> = None;
+        let mut collected = Vec::new();
+
+        let steps = [0.0, 0.20, 0.35, 0.50, 0.65, 0.80, 0.85, 1.0];
+        for &p in &steps {
+            let fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, p, false);
+            collected.extend(fired);
+            last_progress = Some(p);
+        }
+
+        assert_eq!(
+            collected,
+            vec![
+                ReloadSound::MagOut,
+                ReloadSound::MagIn,
+                ReloadSound::BoltRack
+            ]
+        );
+    }
+
+    #[test]
+    fn test_standard_reload_frame_drops() {
+        // Frame drop / spike jumping across all keyframes in a single tick
+        let mut last_progress: Option<f32> = Some(0.1);
+        let fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, 0.9, false);
+        assert_eq!(
+            fired,
+            vec![
+                ReloadSound::MagOut,
+                ReloadSound::MagIn,
+                ReloadSound::BoltRack
+            ]
+        );
+        last_progress = Some(0.9);
+
+        // Next frame to completion does not fire any old events
+        let next_fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, 1.0, false);
+        assert!(next_fired.is_empty());
+    }
+
+    #[test]
+    fn test_shell_reload_normal_steps_and_spikes() {
+        let mut last_progress: Option<f32> = None;
+        let mut collected = Vec::new();
+
+        let steps = [0.0, 0.25, 0.50, 0.75, 1.0];
+        for &p in &steps {
+            let fired = poll_window(&SHELL_RELOAD_EVENTS, last_progress, p, false);
+            collected.extend(fired);
+            last_progress = Some(p);
+        }
+
+        assert_eq!(
+            collected,
+            vec![
+                ReloadSound::Shell,
+                ReloadSound::Shell,
+                ReloadSound::Shell,
+                ReloadSound::BoltRack
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reload_restart_and_reset() {
+        let mut last_progress: Option<f32> = Some(0.3);
+        let fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, 0.5, false);
+        assert_eq!(fired, vec![ReloadSound::MagOut]);
+
+        // Reload interrupted or cancelled -> reset to None
+        last_progress = None;
+
+        // New reload starts at 0.0 -> no events fired yet
+        let start_fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, 0.0, false);
+        assert!(start_fired.is_empty());
+        last_progress = Some(0.0);
+
+        // Advances past MagOut (0.35)
+        let mag_out_fired = poll_window(&STANDARD_RELOAD_EVENTS, last_progress, 0.4, false);
+        assert_eq!(mag_out_fired, vec![ReloadSound::MagOut]);
+    }
+
+    #[test]
+    fn test_reload_sound_mapping() {
+        assert_eq!(ReloadSound::MagOut.snd(), crate::audio::Snd::MagOut);
+        assert_eq!(ReloadSound::MagIn.snd(), crate::audio::Snd::MagIn);
+        assert_eq!(ReloadSound::BoltRack.snd(), crate::audio::Snd::Bolt);
+        assert_eq!(ReloadSound::Shell.snd(), crate::audio::Snd::Shell);
+    }
+}
+

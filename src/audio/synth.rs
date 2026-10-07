@@ -117,6 +117,18 @@ pub fn env(t: f32, a: f32, tau: f32) -> f32 {
     }
 }
 
+/// Calculates playback speed multiplier from pitch offset in cents (1200 cents per octave).
+#[allow(dead_code)]
+pub fn pitch_from_cents(cents: f32) -> f32 {
+    2.0_f32.powf(cents / 1200.0)
+}
+
+/// Calculates linear gain from decibels (dB).
+#[allow(dead_code)]
+pub fn gain_from_db(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
 /// A sine oscillator that can change pitch smoothly.
 pub struct Osc {
     phase: f32,
@@ -1148,6 +1160,112 @@ mod tests {
             .unwrap();
         }
         assert_eq!(&w[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn test_pitch_from_cents_conversion() {
+        assert_eq!(pitch_from_cents(0.0), 1.0);
+        assert!((pitch_from_cents(1200.0) - 2.0).abs() < 1e-6);
+        assert!((pitch_from_cents(-1200.0) - 0.5).abs() < 1e-6);
+        assert!((pitch_from_cents(2400.0) - 4.0).abs() < 1e-6);
+        assert!((pitch_from_cents(-2400.0) - 0.25).abs() < 1e-6);
+        let semitone = pitch_from_cents(100.0);
+        assert!((semitone - 2.0_f32.powf(1.0 / 12.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gain_from_db_conversion() {
+        assert_eq!(gain_from_db(0.0), 1.0);
+        assert!((gain_from_db(20.0) - 10.0).abs() < 1e-5);
+        assert!((gain_from_db(-20.0) - 0.1).abs() < 1e-5);
+        assert!((gain_from_db(40.0) - 100.0).abs() < 1e-4);
+        assert!((gain_from_db(-6.0205999) - 0.5).abs() < 1e-5);
+        assert!((gain_from_db(6.0205999) - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_poll_window_normal_window() {
+        use super::super::poll_window;
+
+        let events = [(0.0, 0), (5.0, 1), (15.0, 2)];
+        // Before first event (0.3 to 4.9): nothing fires
+        assert_eq!(poll_window(&events, Some(0.3), 4.9, false), Vec::<i32>::new());
+        // Exact landing on 5.0: event 1 fires
+        assert_eq!(poll_window(&events, Some(4.9), 5.0, false), vec![1]);
+        // Immediately after 5.0: event 1 does not fire again (half-open (last, current])
+        assert_eq!(poll_window(&events, Some(5.0), 5.5, false), Vec::<i32>::new());
+        // Progression across 15.0: event 2 fires
+        assert_eq!(poll_window(&events, Some(14.0), 15.0, false), vec![2]);
+    }
+
+    #[test]
+    fn test_poll_window_jump_over_window() {
+        use super::super::poll_window;
+
+        // Frame spike: large dt jumps past multiple events in a single tick
+        let events = [(2.0, "step"), (5.0, "swing"), (8.0, "impact"), (12.0, "recover")];
+        // Jump from frame 1.0 to frame 10.0: should catch events at 2.0, 5.0, and 8.0 without missing
+        let fired = poll_window(&events, Some(1.0), 10.0, false);
+        assert_eq!(fired, vec!["step", "swing", "impact"]);
+        // Next frame moves from 10.0 to 13.0: should catch event at 12.0
+        let fired_next = poll_window(&events, Some(10.0), 13.0, false);
+        assert_eq!(fired_next, vec!["recover"]);
+    }
+
+    #[test]
+    fn test_poll_window_loop_wrap_around() {
+        use super::super::{heard_frame, poll_window};
+
+        let events = [(0.0, 0), (5.0, 1), (15.0, 2)];
+        // A loop wrapping from 14.0 to 2.0 passes 15.0 (tail of loop), then 0.0 (head of next cycle)
+        assert_eq!(poll_window(&events, Some(14.0), 2.0, true), vec![0, 2]);
+
+        // Wall-clock continuous loop with rem_euclid (e.g. 16-frame loop from 0 to 15)
+        let loop_events = [(10.0, 42)];
+        let clip_frames = 16;
+        let mut fired_count = 0;
+        let mut last = None;
+        let mut clock = 0.0_f32;
+        // Run 5 full loop iterations with arbitrary frame step
+        while clock < 80.0 {
+            let frame = heard_frame(clock, true, clip_frames);
+            let triggers = poll_window(&loop_events, last, frame, true);
+            fired_count += triggers.len();
+            last = Some(frame);
+            clock += 0.73; // non-integer step to ensure landing between frames
+        }
+        assert_eq!(fired_count, 5);
+
+        // Action restarting from beginning (looped = false)
+        assert_eq!(poll_window(&events, Some(20.0), 0.5, false), vec![0]);
+
+        // Initial frame start (last == None)
+        assert_eq!(poll_window(&events, None, 0.3, false), vec![0]);
+    }
+
+    #[test]
+    fn test_poll_window_empty_cases() {
+        use super::super::poll_window;
+
+        // 1. Empty events list
+        let empty_events: &[(f32, usize)] = &[];
+        assert_eq!(poll_window(empty_events, Some(1.0), 10.0, false), Vec::<usize>::new());
+        assert_eq!(poll_window(empty_events, None, 1.0, false), Vec::<usize>::new());
+        assert_eq!(poll_window(empty_events, Some(10.0), 2.0, true), Vec::<usize>::new());
+
+        // 2. No events falling in the window
+        let events = [(1.0, 10), (10.0, 20)];
+        assert_eq!(poll_window(&events, Some(3.0), 7.0, false), Vec::<i32>::new());
+
+        // 3. Same frame (zero time delta)
+        assert_eq!(poll_window(&events, Some(1.0), 1.0, false), Vec::<i32>::new());
+        assert_eq!(poll_window(&events, Some(10.0), 10.0, true), Vec::<i32>::new());
+
+        // 4. Event exactly at last (exclusive lower bound)
+        assert_eq!(poll_window(&events, Some(1.0), 5.0, false), Vec::<i32>::new());
+
+        // 5. Initial call (last == None) with no events in initial window
+        assert_eq!(poll_window(&events, None, 5.0, false), Vec::<i32>::new());
     }
 }
 

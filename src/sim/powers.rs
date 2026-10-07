@@ -1588,8 +1588,11 @@ pub(super) fn turrets(
             .min_by(|a, b| a.1.distance(gun).total_cmp(&b.1.distance(gun)));
         let Some((enemy, at)) = target else { continue };
         let flat = (at - gun).with_y(0.0).normalize_or(Vec3::NEG_Z);
-        tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, flat);
-        if t.cooldown <= 0.0 {
+        let goal = Quat::from_rotation_arc(Vec3::NEG_Z, flat);
+        let turn_rate = 12.0; // Responsive mechanical swivel speed
+        let factor = (1.0 - (-turn_rate * dt).exp()).clamp(0.0, 1.0);
+        tf.rotation = tf.rotation.slerp(goal, factor);
+        if t.cooldown <= 0.0 && tf.forward().dot(flat) > 0.85 {
             t.cooldown = 0.35;
             damage.0.push(event(enemy, t.damage, t.owner, t.elements, 0.0));
             emit(
@@ -1771,5 +1774,119 @@ mod tests {
         let g = app.world().get::<GrenadeBrain>(nade).unwrap();
         assert!(g.landed);
         assert_eq!(g.velocity, Vec3::ZERO);
+    }
+
+    fn setup_turret_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(50)));
+        app.init_resource::<Zones>();
+        app.init_resource::<DamageQueue>();
+        app.init_resource::<FxQueue>();
+        app.init_resource::<FxOutbox>();
+        let mut roster = Roster::default();
+        let mut owner = crate::PlayerInfo::new(0, "Owner".to_string(), crate::Character::Medic, 0);
+        owner.pos = [0.0, 0.0, 0.0];
+        roster.0.insert(0, owner);
+        app.insert_resource(roster);
+        app.add_systems(Update, turrets);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn test_turret_smooth_angular_tracking_slerp() {
+        let mut app = setup_turret_app();
+
+        // Spawn drone facing Vec3::NEG_Z (identity rotation)
+        let drone = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 2.0, 0.0),
+            TurretBrain {
+                owner: 0,
+                life: 20.0,
+                cooldown: 0.0,
+                damage: 10.0,
+                elements: 0,
+                follow: Some(0),
+                heal: 0.0,
+                heal_timer: 1.0,
+                wraith: false,
+                slot: 0,
+            },
+        )).id();
+
+        // Spawn enemy at 90 degrees (along +X axis)
+        let enemy = app.world_mut().spawn((
+            Transform::from_xyz(5.0, 0.0, 0.0),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: 100.0,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 100.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 0.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 35.0,
+                max_poise: 35.0,
+                poise_broken: 0.0,
+                since_hit: 0.0,
+            },
+        )).id();
+
+        // Target orientation is +X (flat direction = Vec3::X).
+        // Target is at 90 deg from NEG_Z.
+        let target_dir = Vec3::X;
+
+        // Step 1: After 1 frame (50ms), rotation should NOT snap directly to target (+X).
+        // It should smoothly rotate toward +X.
+        app.update();
+
+        let tf1 = *app.world().get::<Transform>(drone).unwrap();
+        let fwd1 = tf1.forward();
+        let dot1 = fwd1.dot(target_dir);
+
+        // It has begun turning towards +X (dot > 0), but hasn't snapped instantly (dot < 0.85)
+        assert!(dot1 > 0.0, "Drone should turn towards target direction");
+        assert!(dot1 < 0.85, "Drone should not instantly snap to target on frame 1");
+
+        // Should not have fired yet because dot < 0.85
+        let dmg_queue = app.world().resource::<DamageQueue>();
+        assert_eq!(dmg_queue.0.len(), 0, "Turret should not fire before facing target");
+
+        // Step 2: Step several more frames (simulate tracking over time)
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let tf2 = *app.world().get::<Transform>(drone).unwrap();
+        let fwd2 = tf2.forward();
+        let dot2 = fwd2.dot(target_dir);
+
+        // After multiple frames, dot product should have smoothly increased towards 1.0
+        assert!(dot2 > dot1, "Forward direction should continue smoothly rotating towards target");
+        assert!(dot2 > 0.85, "Forward direction should align with target over time");
+
+        // Once aligned (dot > 0.85), turret fires
+        let dmg_queue = app.world().resource::<DamageQueue>();
+        assert!(!dmg_queue.0.is_empty(), "Turret should fire once oriented towards target");
+        assert_eq!(dmg_queue.0[0].target, enemy);
     }
 }

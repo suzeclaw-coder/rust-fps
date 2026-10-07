@@ -141,6 +141,10 @@ pub struct EnemyBrain {
     pub flank_bias: f32,
     /// Attack telegraph windup timer (seconds remaining before a melee bite/strike lands, target_id).
     pub attack_windup: Option<(f32, u8)>,
+    pub poise: f32,
+    pub max_poise: f32,
+    pub poise_broken: f32,
+    pub since_hit: f32,
 }
 
 /// How a Brute or boss slam lands: windup seconds, radius, how far ahead
@@ -964,6 +968,15 @@ fn status_effects(
         b.slow -= dt;
         b.stun -= dt;
         b.flinch -= dt;
+        b.since_hit += dt;
+        if b.poise_broken > 0.0 {
+            b.poise_broken -= dt;
+            if b.poise_broken <= 0.0 {
+                b.poise = b.max_poise;
+            }
+        } else if b.since_hit >= 5.0 {
+            b.poise = (b.poise + 10.0 * dt).min(b.max_poise);
+        }
         if b.burn > 0.0 {
             b.burn -= dt;
             damage.0.push(DamageEvent {
@@ -1048,6 +1061,9 @@ fn apply_damage(
         if state.insta_kill > 0.0 && from.is_some() && !chained && !brain.kind.is_boss() {
             amount = amount.max(brain.health);
         }
+        if brain.poise_broken > 0.0 {
+            amount *= 1.5;
+        }
         if brain.marked > 0.0 {
             amount *= powers::MARK_BONUS;
         }
@@ -1068,6 +1084,30 @@ fn apply_damage(
             _ => 1.0,
         };
         brain.stun = brain.stun.max(stun * resist);
+        let poise_dmg = amount * (if headshot { 1.5 } else { 1.0 });
+        brain.since_hit = 0.0;
+        if brain.poise_broken <= 0.0 {
+            brain.poise -= poise_dmg;
+            if brain.poise <= 0.0 {
+                let stagger = match brain.kind {
+                    NetKind::Boss(_) => 2.5,
+                    NetKind::Brute => 1.8,
+                    _ => 1.2,
+                };
+                brain.poise_broken = stagger;
+                brain.stun = brain.stun.max(stagger);
+                brain.flinch = brain.flinch.max(stagger.min(0.5));
+                brain.poise = 0.0;
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Sparks {
+                        pos: (pos + Vec3::Y * (1.1 * enemy_scale(brain.kind))).to_array(),
+                        count: if brain.kind.is_boss() { 36 } else { 20 },
+                    },
+                );
+            }
+        }
         if ev.knockback != Vec3::ZERO {
             brain.knockback += ev.knockback * resist;
         }
@@ -1615,6 +1655,12 @@ fn spawn_zombie(
     state.next_net_id += 1;
     let e = spawn_replicated(commands, assets, rigs, materials, id, kind, pos);
     let flank_bias = rng.gen_range(-0.55..0.55);
+    let max_poise = match kind {
+        NetKind::Shooter => 25.0,
+        NetKind::Brute => 120.0,
+        NetKind::Boss(_) => 300.0,
+        _ => if is_sprinter { 20.0 } else { 35.0 },
+    };
     commands.entity(e).insert(EnemyBrain {
         kind,
         health,
@@ -1641,6 +1687,10 @@ fn spawn_zombie(
         is_sprinter,
         flank_bias,
         attack_windup: None,
+        poise: max_poise,
+        max_poise,
+        poise_broken: 0.0,
+        since_hit: 5.0,
     });
 }
 
@@ -3097,6 +3147,10 @@ mod tests {
                 is_sprinter: false,
                 flank_bias: 0.0,
                 attack_windup: None,
+                poise: 35.0,
+                max_poise: 35.0,
+                poise_broken: 0.0,
+                since_hit: 5.0,
             },
         )).id();
 
@@ -3127,6 +3181,400 @@ mod tests {
             dmg.amount,
             expected_attenuated
         );
+    }
+
+    #[test]
+    fn test_poise_damage_accumulates_and_posture_break() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let enemy = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: 500.0,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 500.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 0.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 35.0,
+                max_poise: 35.0,
+                poise_broken: 0.0,
+                since_hit: 5.0,
+            },
+        )).id();
+
+        // 1st hit: 10 body damage -> 10 poise damage. Poise should accumulate (35 - 10 = 25).
+        let mut queue = app.world_mut().resource_mut::<DamageQueue>();
+        queue.0.push(DamageEvent {
+            target: enemy,
+            amount: 10.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: 0,
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert!((brain.poise - 25.0).abs() < 1e-4, "Poise should be 25.0 after 10 poise damage, got {}", brain.poise);
+        assert_eq!(brain.poise_broken, 0.0);
+        assert_eq!(brain.since_hit, 0.0);
+
+        // 2nd hit: 10 headshot damage -> 15 poise damage (1.5x headshot multiplier).
+        // 25 - 15 = 10 poise remaining.
+        let mut queue = app.world_mut().resource_mut::<DamageQueue>();
+        queue.0.push(DamageEvent {
+            target: enemy,
+            amount: 10.0,
+            from: None,
+            headshot: true,
+            legs: false,
+            elements: 0,
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert!((brain.poise - 10.0).abs() < 1e-4, "Poise should be 10.0 after 15 poise damage, got {}", brain.poise);
+        assert_eq!(brain.poise_broken, 0.0);
+        assert_eq!(brain.since_hit, 0.0);
+
+        // 3rd hit: 15 body damage -> exceeds remaining 10 poise -> Posture Break!
+        let mut queue = app.world_mut().resource_mut::<DamageQueue>();
+        queue.0.push(DamageEvent {
+            target: enemy,
+            amount: 15.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: 0,
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert_eq!(brain.poise, 0.0, "Poise should be 0 on posture break");
+        assert_eq!(brain.poise_broken, 1.2, "Poise broken timer should be set to 1.2s for normal enemy");
+        assert!(brain.stun >= 1.2, "Stun duration should be set to at least 1.2s on posture break");
+
+        // Verify that posture break triggered spark FX emission
+        let fx_queue = app.world().resource::<FxQueue>();
+        let spark_fx = fx_queue.0.iter().find(|fx| matches!(fx, Fx::Sparks { count: 20, .. }));
+        assert!(spark_fx.is_some(), "Posture break should emit high-impact spark particle burst");
+    }
+
+    #[test]
+    fn test_poise_broken_vulnerability_multiplier() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let initial_health = 100.0;
+        let enemy = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: initial_health,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: initial_health,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 1.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 0.0,
+                max_poise: 35.0,
+                poise_broken: 1.5, // Currently in a broken posture
+                since_hit: 0.0,
+            },
+        )).id();
+
+        let base_damage = 20.0;
+        let mut queue = app.world_mut().resource_mut::<DamageQueue>();
+        queue.0.push(DamageEvent {
+            target: enemy,
+            amount: base_damage,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: 0,
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        // Base damage 20.0 with 1.5x vulnerability multiplier = 30.0 damage dealt
+        let expected_health = initial_health - base_damage * 1.5;
+        assert!(
+            (brain.health - expected_health).abs() < 1e-4,
+            "Enemy in broken posture should take 1.5x damage: expected health {}, got {}",
+            expected_health,
+            brain.health
+        );
+    }
+
+    #[test]
+    fn test_poise_broken_boss_fx() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let boss = app.world_mut().spawn((
+            Transform::from_xyz(10.0, 0.0, 5.0),
+            EnemyStatus::default(),
+            EnemyBrain {
+                kind: NetKind::Boss(0),
+                health: 1000.0,
+                knockback: Vec3::ZERO,
+                speed: 3.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 1000.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 0.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 10.0,
+                max_poise: 300.0,
+                poise_broken: 0.0,
+                since_hit: 0.0,
+            },
+        )).id();
+
+        let mut queue = app.world_mut().resource_mut::<DamageQueue>();
+        queue.0.push(DamageEvent {
+            target: boss,
+            amount: 20.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: 0,
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain = app.world().get::<EnemyBrain>(boss).unwrap();
+        assert_eq!(brain.poise, 0.0);
+        assert_eq!(brain.poise_broken, 2.5);
+
+        let fx_queue = app.world().resource::<FxQueue>();
+        let spark_fx = fx_queue.0.iter().find(|fx| matches!(fx, Fx::Sparks { count: 36, .. }));
+        assert!(spark_fx.is_some(), "Boss posture break should emit 36 sparks");
+    }
+
+    #[test]
+    fn test_poise_regeneration_after_delay() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(100)));
+        app.insert_resource(DamageQueue::default());
+        app.add_systems(Update, status_effects);
+        app.update(); // Initialize Bevy time delta
+
+        let enemy = app.world_mut().spawn((
+            EnemyStatus::default(),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: 100.0,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 100.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 0.0,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 15.0,
+                max_poise: 35.0,
+                poise_broken: 0.0,
+                since_hit: 0.0, // Just took a hit
+            },
+        )).id();
+
+        // 40 updates of 0.1s = 4.0s (less than 5.0s delay)
+        for _ in 0..40 {
+            app.update();
+        }
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert_eq!(brain.poise, 15.0, "Poise should not regenerate before 5.0 seconds delay has passed");
+        assert!((brain.since_hit - 4.0).abs() < 1e-3, "since_hit expected 4.0, got {}", brain.since_hit);
+
+        // 15 updates of 0.1s = 1.5s (since_hit goes from 4.0s to 5.5s).
+        // Since delay is 5.0s, regeneration occurred during the 5 frames where since_hit >= 5.0 (0.5s of regen).
+        // At 10.0 poise/s, +5.0 poise regenerated -> 15.0 + 5.0 = 20.0 poise.
+        for _ in 0..15 {
+            app.update();
+        }
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert!(brain.poise > 15.0, "Poise should regenerate once since_hit >= 5.0s, got {}", brain.poise);
+        assert!((brain.poise - 20.0).abs() < 1e-3, "Expected poise 20.0 (15 + 0.5 * 10), got {}", brain.poise);
+
+        // Another 20 updates of 0.1s = 2.0s -> 20.0 + 20.0 = 40.0, clamped at max_poise (35.0)
+        for _ in 0..20 {
+            app.update();
+        }
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert_eq!(brain.poise, 35.0, "Poise should be clamped at max_poise");
+    }
+
+    #[test]
+    fn test_poise_broken_recovery() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(100)));
+        app.insert_resource(DamageQueue::default());
+        app.add_systems(Update, status_effects);
+        app.update(); // Initialize Bevy time delta
+
+        let enemy = app.world_mut().spawn((
+            EnemyStatus::default(),
+            EnemyBrain {
+                kind: NetKind::Grunt,
+                health: 100.0,
+                knockback: Vec3::ZERO,
+                speed: 2.0,
+                attack_timer: 1.0,
+                burn: 0.0,
+                burn_dps: 0.0,
+                burn_by: None,
+                slow: 0.0,
+                max_health: 100.0,
+                leg_damage: 0.0,
+                crawler: false,
+                swing: 0.0,
+                stun: 1.2,
+                flinch: 0.0,
+                slam: false,
+                volley: 0.0,
+                summons: 0,
+                poison: 0.0,
+                poison_dps: 0.0,
+                poison_by: None,
+                marked: 0.0,
+                is_sprinter: false,
+                flank_bias: 0.0,
+                attack_windup: None,
+                poise: 0.0,
+                max_poise: 35.0,
+                poise_broken: 1.2,
+                since_hit: 0.0,
+            },
+        )).id();
+
+        // Advance 6 * 0.1s = 0.6s -> halfway through stagger
+        for _ in 0..6 {
+            app.update();
+        }
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert!((brain.poise_broken - 0.6).abs() < 1e-4);
+        assert_eq!(brain.poise, 0.0);
+
+        // Advance 7 * 0.1s = 0.7s -> stagger expires, poise should restore to max_poise
+        for _ in 0..7 {
+            app.update();
+        }
+
+        let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
+        assert!(brain.poise_broken <= 0.0);
+        assert_eq!(brain.poise, brain.max_poise, "Poise should be restored to max_poise when posture break expires");
     }
 }
 

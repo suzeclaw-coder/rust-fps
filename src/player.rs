@@ -97,6 +97,46 @@ pub struct LocalPlayer {
     /// (yaw offset, pitch) the mouse has moved it to.
     pub cam_out: f32,
     pub orbit: Vec2,
+    pub peak_y: f32,
+    pub health: f32,
+}
+
+#[allow(dead_code)]
+pub type Player = LocalPlayer;
+
+impl Default for LocalPlayer {
+    fn default() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 0.0,
+            kick: 0.0,
+            roll: 0.0,
+            feet: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            on_ground: true,
+            crouching: false,
+            sliding: 0.0,
+            slide_cd: 0.0,
+            eye: EYE_HEIGHT,
+            sprinting: false,
+            dash_time: 0.0,
+            dash_dir: Vec3::ZERO,
+            last_spawn_seq: None,
+            air_time: 0.0,
+            ground_time: 0.0,
+            last_air: 0.0,
+            jump_buffer: 0.0,
+            mantle_time: 0.0,
+            mantle_cd: 0.0,
+            mantle_target_y: 0.0,
+            emote: None,
+            emote_seq: 0,
+            cam_out: 0.0,
+            orbit: Vec2::ZERO,
+            peak_y: 0.0,
+            health: 100.0,
+        }
+    }
 }
 
 impl LocalPlayer {
@@ -157,6 +197,8 @@ pub fn spawn_camera(mut commands: Commands) {
             emote_seq: 0,
             cam_out: 0.0,
             orbit: Vec2::ZERO,
+            peak_y: 0.0,
+            health: 100.0,
         },
         Camera3d::default(),
         bevy::audio::SpatialListener::new(0.25),
@@ -181,6 +223,7 @@ fn reset_camera(mut player: Single<(&mut Transform, &mut LocalPlayer)>) {
     p.air_time = 0.0;
     p.last_air = 0.0;
     p.roll = 0.0;
+    p.peak_y = 0.0;
     **tf = Transform::from_xyz(0.0, EYE_HEIGHT, 0.0);
 }
 
@@ -240,6 +283,8 @@ fn respawn(
     player.pitch = 0.0;
     player.roll = 0.0;
     player.sliding = 0.0;
+    player.peak_y = player.feet.y;
+    player.health = me.health;
     // Show the spawn even before the first click to play.
     *tf = Transform::from_translation(player.feet + Vec3::Y * player.eye)
         .with_rotation(Quat::from_rotation_y(player.yaw));
@@ -573,6 +618,7 @@ pub fn movement(
         }
     }
     p.feet = feet;
+    update_movement(&mut p, feet);
     if p.on_ground {
         if p.air_time > 0.0 {
             p.last_air = p.air_time;
@@ -616,7 +662,7 @@ pub fn movement(
         p.roll = 0.0;
     }
     tf.translation = p.eye_pos();
-    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).min(1.5), p.roll);
+    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).clamp(-1.5, 1.5), p.roll);
 }
 
 /// Copies our position into the roster so the host (and others) see it.
@@ -628,6 +674,30 @@ fn sync_to_roster(session: Res<Session>, mut roster: ResMut<Roster>, player: Sin
         me.stance = player.stance();
         me.emote = player.emote.map_or(0, |e| e.0);
         me.emote_seq = player.emote_seq;
+        if player.health < me.health {
+            me.health = player.health;
+        }
+    }
+}
+
+/// Tracks peak height, heavy landing camera dip, and fall damage on touchdown.
+pub fn update_movement(p: &mut LocalPlayer, feet: Vec3) {
+    if !p.on_ground {
+        p.peak_y = p.peak_y.max(feet.y);
+    } else if p.air_time > 0.0 {
+        let drop_h = (p.peak_y - feet.y).max(0.0);
+        if drop_h > 4.5 {
+            let dip = ((drop_h - 4.0) * 0.035).min(0.4);
+            p.kick -= dip;
+            p.kick = p.kick.max(-0.4);
+        }
+        if drop_h > 9.0 {
+            let fall_damage = (drop_h - 9.0) * 12.0;
+            p.health = (p.health - fall_damage).max(1.0);
+        }
+        p.peak_y = feet.y;
+    } else {
+        p.peak_y = feet.y;
     }
 }
 
@@ -664,6 +734,8 @@ mod tests {
             emote_seq: 0,
             cam_out: 0.0,
             orbit: Vec2::ZERO,
+            peak_y: 0.0,
+            health: 100.0,
         }
     }
 
@@ -824,6 +896,113 @@ mod tests {
 
         // Diff 3.0m is well beyond reachable 1.20m mantle threshold, so no ledge is found
         assert!(best_ledge.is_none());
+    }
+
+    #[test]
+    fn test_peak_height_tracking_jumping_and_falling() {
+        let mut p = Player::default();
+        assert_eq!(p.peak_y, 0.0);
+        assert_eq!(p.health, 100.0);
+        assert!(p.on_ground);
+
+        // Grounded: maintains peak_y = feet.y
+        p.feet = Vec3::new(0.0, 1.5, 0.0);
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+        assert_eq!(p.peak_y, 1.5);
+
+        // Jump into air
+        p.on_ground = false;
+        p.air_time = 0.1;
+
+        // Ascend to 4.0m
+        p.feet = Vec3::new(0.0, 4.0, 0.0);
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+        assert_eq!(p.peak_y, 4.0);
+
+        // Reach apex at 7.2m
+        p.feet = Vec3::new(0.0, 7.2, 0.0);
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+        assert_eq!(p.peak_y, 7.2);
+
+        // Falling down through 5.0m and 2.0m: peak_y should remain at apex 7.2m
+        p.feet = Vec3::new(0.0, 5.0, 0.0);
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+        assert_eq!(p.peak_y, 7.2, "peak_y should not decrease while falling");
+
+        p.feet = Vec3::new(0.0, 2.0, 0.0);
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+        assert_eq!(p.peak_y, 7.2, "peak_y should stay at apex 7.2m");
+    }
+
+    #[test]
+    fn test_camera_kick_and_fall_damage_from_altitudes() {
+        // Case 1: Low drop (3.0m < 4.5m) -> No camera dip, no fall damage
+        let mut p = Player::default();
+        p.on_ground = false;
+        p.air_time = 0.5;
+        p.peak_y = 3.0;
+        p.feet = Vec3::ZERO;
+        p.on_ground = true; // touchdown!
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+
+        assert_eq!(p.kick, 0.0, "No camera kick for drops under 4.5m");
+        assert_eq!(p.health, 100.0, "No fall damage for drops under 9.0m");
+        assert_eq!(p.peak_y, 0.0, "Peak height resets to feet.y on landing");
+
+        // Case 2: Moderate drop (6.0m: > 4.5m but <= 9.0m) -> Camera dip, but no fall damage
+        let mut p = Player::default();
+        p.on_ground = false;
+        p.air_time = 0.8;
+        p.peak_y = 6.0;
+        p.feet = Vec3::ZERO;
+        p.on_ground = true;
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+
+        // drop_h = 6.0: kick -= (6.0 - 4.0) * 0.035 = 2.0 * 0.035 = 0.07
+        let expected_kick = -0.07;
+        assert!((p.kick - expected_kick).abs() < 1e-4, "Heavy landing camera dip applied: expected {}, got {}", expected_kick, p.kick);
+        assert_eq!(p.health, 100.0, "No fall damage when drop <= 9.0m");
+        assert_eq!(p.peak_y, 0.0);
+
+        // Case 3: High drop (12.0m > 9.0m) -> Camera dip and fall damage
+        let mut p = Player::default();
+        p.on_ground = false;
+        p.air_time = 1.2;
+        p.peak_y = 12.0;
+        p.feet = Vec3::ZERO;
+        p.on_ground = true;
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+
+        // drop_h = 12.0: kick -= (12.0 - 4.0) * 0.035 = 8.0 * 0.035 = 0.28
+        let expected_kick = -0.28;
+        assert!((p.kick - expected_kick).abs() < 1e-4, "Expected kick {}, got {}", expected_kick, p.kick);
+        // fall damage: (12.0 - 9.0) * 12.0 = 36.0 -> health: 100.0 - 36.0 = 64.0
+        assert_eq!(p.health, 64.0, "Fall damage reduces health to 64.0");
+        assert_eq!(p.peak_y, 0.0);
+
+        // Case 4: Extreme drop (25.0m) -> Clamped camera dip and health floored at 1.0
+        let mut p = Player::default();
+        p.on_ground = false;
+        p.air_time = 2.0;
+        p.peak_y = 25.0;
+        p.feet = Vec3::ZERO;
+        p.on_ground = true;
+        let feet = p.feet;
+        update_movement(&mut p, feet);
+
+        // Camera kick clamped at -0.4
+        assert_eq!(p.kick, -0.4, "Camera dip should be clamped");
+        // fall damage: (25.0 - 9.0) * 12.0 = 192.0 -> (100 - 192).max(1.0) = 1.0
+        assert_eq!(p.health, 1.0, "Fall damage floors at 1.0 HP");
+        assert_eq!(p.peak_y, 0.0);
     }
 }
 

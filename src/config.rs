@@ -513,6 +513,63 @@ fn apply_display(
     ui_scale.0 = scale;
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureEvent {
+    Tap,
+    HoldStarted,
+    HoldSustained,
+    ReleaseAfterHold,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct GestureTracker {
+    pub hold_time: f32,
+    pub armed: bool,
+    pub hold_triggered: bool,
+}
+
+impl GestureTracker {
+    #[allow(dead_code)]
+    pub fn update(
+        &mut self,
+        dt: f32,
+        pressed: bool,
+        held: bool,
+        released: bool,
+        threshold: f32,
+    ) -> Option<GestureEvent> {
+        if pressed {
+            self.hold_time = 0.0;
+            self.armed = true;
+            self.hold_triggered = false;
+        }
+
+        if held && self.armed {
+            self.hold_time += dt;
+            if self.hold_time >= threshold && !self.hold_triggered {
+                self.hold_triggered = true;
+                return Some(GestureEvent::HoldStarted);
+            }
+            if self.hold_triggered {
+                return Some(GestureEvent::HoldSustained);
+            }
+        }
+
+        if released && self.armed {
+            self.armed = false;
+            if !self.hold_triggered {
+                return Some(GestureEvent::Tap);
+            } else {
+                return Some(GestureEvent::ReleaseAfterHold);
+            }
+        }
+
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,4 +582,89 @@ mod tests {
         assert_eq!(s.sensitivity, 1.2);
         assert_eq!(s.ui_scale, 1.0);
     }
+
+    #[test]
+    fn gesture_tracker_tap() {
+        let mut tracker = GestureTracker::default();
+        let threshold = 0.3;
+
+        // Key pressed on frame 1
+        assert_eq!(tracker.update(0.016, true, true, false, threshold), None);
+        assert!(tracker.armed);
+        assert!(!tracker.hold_triggered);
+
+        // Key held briefly on frame 2
+        assert_eq!(tracker.update(0.05, false, true, false, threshold), None);
+
+        // Key released before threshold
+        assert_eq!(
+            tracker.update(0.016, false, false, true, threshold),
+            Some(GestureEvent::Tap)
+        );
+        assert!(!tracker.armed);
+
+        // Subsequent idle frame returns None
+        assert_eq!(tracker.update(0.016, false, false, false, threshold), None);
+    }
+
+    #[test]
+    fn gesture_tracker_hold_and_release() {
+        let mut tracker = GestureTracker::default();
+        let threshold = 0.3;
+
+        // Key pressed
+        assert_eq!(tracker.update(0.0, true, true, false, threshold), None);
+
+        // Held for 0.2s (total 0.2s < 0.3s)
+        assert_eq!(tracker.update(0.2, false, true, false, threshold), None);
+        assert!(!tracker.hold_triggered);
+
+        // Held for another 0.15s (total 0.35s >= 0.3s) -> HoldStarted
+        assert_eq!(
+            tracker.update(0.15, false, true, false, threshold),
+            Some(GestureEvent::HoldStarted)
+        );
+        assert!(tracker.hold_triggered);
+
+        // Next frame still held -> HoldSustained
+        assert_eq!(
+            tracker.update(0.016, false, true, false, threshold),
+            Some(GestureEvent::HoldSustained)
+        );
+
+        // Released -> ReleaseAfterHold
+        assert_eq!(
+            tracker.update(0.016, false, false, true, threshold),
+            Some(GestureEvent::ReleaseAfterHold)
+        );
+        assert!(!tracker.armed);
+
+        // Frame after release
+        assert_eq!(tracker.update(0.016, false, false, false, threshold), None);
+    }
+
+    #[test]
+    fn gesture_tracker_interrupted_and_unpressed() {
+        let mut tracker = GestureTracker::default();
+        let threshold = 0.3;
+
+        // Idle state without pressing
+        assert_eq!(tracker.update(0.1, false, false, false, threshold), None);
+        assert_eq!(tracker.update(0.1, false, false, true, threshold), None);
+
+        // Press and hold
+        assert_eq!(tracker.update(0.1, true, true, false, threshold), None);
+        assert!(tracker.armed);
+
+        // Interrupted release without hold triggering gives tap
+        assert_eq!(
+            tracker.update(0.05, false, false, true, threshold),
+            Some(GestureEvent::Tap)
+        );
+        assert!(!tracker.armed);
+
+        // Extra release when disarmed produces None
+        assert_eq!(tracker.update(0.05, false, false, true, threshold), None);
+    }
 }
+

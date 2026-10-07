@@ -188,6 +188,65 @@ fn emote_input(
     };
 }
 
+/// Computes the shortest signed angular difference from angle `from` to `to` in radians.
+/// Output is in the range `[-PI, PI]`.
+#[allow(dead_code)]
+pub fn angle_diff(from: f32, to: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    (to - from + PI).rem_euclid(TAU) - PI
+}
+
+/// Spring-arm camera state smoothing pivot follow and collision distance easing.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct SpringArmState {
+    pub pivot: Vec3,
+    pub current_dist: f32,
+    pub pivot_initialized: bool,
+    pub dist_initialized: bool,
+}
+
+impl SpringArmState {
+    pub const HORIZONTAL_FOLLOW_RATE: f32 = 14.0;
+    pub const VERTICAL_FOLLOW_RATE: f32 = 6.0;
+    pub const COLLISION_SNAP_RATE: f32 = 24.0;
+    pub const CLEARANCE_EASE_RATE: f32 = 8.0;
+
+    pub fn reset(&mut self) {
+        self.pivot_initialized = false;
+        self.dist_initialized = false;
+    }
+
+    pub fn update_pivot(&mut self, target: Vec3, dt: f32) -> Vec3 {
+        if !self.pivot_initialized {
+            self.pivot = target;
+            self.pivot_initialized = true;
+            return self.pivot;
+        }
+        let h_blend = 1.0 - (-Self::HORIZONTAL_FOLLOW_RATE * dt).exp();
+        let v_blend = 1.0 - (-Self::VERTICAL_FOLLOW_RATE * dt).exp();
+        self.pivot.x += (target.x - self.pivot.x) * h_blend;
+        self.pivot.z += (target.z - self.pivot.z) * h_blend;
+        self.pivot.y += (target.y - self.pivot.y) * v_blend;
+        self.pivot
+    }
+
+    pub fn update_dist(&mut self, target_dist: f32, dt: f32) -> f32 {
+        if !self.dist_initialized {
+            self.current_dist = target_dist;
+            self.dist_initialized = true;
+            return self.current_dist;
+        }
+        let rate = if target_dist < self.current_dist {
+            Self::COLLISION_SNAP_RATE
+        } else {
+            Self::CLEARANCE_EASE_RATE
+        };
+        let blend = 1.0 - (-rate * dt).exp();
+        self.current_dist += (target_dist - self.current_dist) * blend;
+        self.current_dist
+    }
+}
+
 /// Pulls the camera out in front of you while you emote, so you can
 /// see your character; the mouse orbits it.
 fn emote_camera(
@@ -196,6 +255,7 @@ fn emote_camera(
     settings: Res<Settings>,
     player: Single<(&mut Transform, &mut LocalPlayer)>,
     colliders: Query<(&Transform, &Collider), Without<LocalPlayer>>,
+    mut arm: Local<SpringArmState>,
 ) {
     let (mut tf, mut p) = player.into_inner();
     let dt = time.delta_secs();
@@ -206,6 +266,7 @@ fn emote_camera(
         (p.cam_out - dt * 5.0).max(0.0)
     };
     if p.cam_out <= 0.0 {
+        arm.reset();
         return;
     }
     if p.emoting() {
@@ -222,11 +283,105 @@ fn emote_camera(
         pitch.sin(),
         -yaw.cos() * pitch.cos(),
     );
-    let focus = p.feet + Vec3::Y * 1.15;
+    let target_focus = p.feet + Vec3::Y * 1.15;
+    let focus = arm.update_pivot(target_focus, dt);
+
     let boxes = collect_boxes(colliders.iter());
-    let dist = (ray_world(focus, dir, CAMERA_DISTANCE, &boxes) - 0.25).clamp(0.6, CAMERA_DISTANCE);
+    let target_dist =
+        (ray_world(focus, dir, CAMERA_DISTANCE, &boxes) - 0.25).clamp(0.6, CAMERA_DISTANCE);
+    let dist = arm.update_dist(target_dist, dt);
+
     let cam = focus + dir * dist;
     let look = Transform::from_translation(cam).looking_at(focus, Vec3::Y);
     tf.translation = tf.translation.lerp(cam, out);
     tf.rotation = tf.rotation.slerp(look.rotation, out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    #[test]
+    fn test_angle_diff_shortest_arc() {
+        // Same angle
+        assert!((angle_diff(1.0, 1.0)).abs() < 1e-6);
+
+        // Small positive & negative angles
+        assert!((angle_diff(0.0, 0.5) - 0.5).abs() < 1e-6);
+        assert!((angle_diff(0.5, 0.0) - (-0.5)).abs() < 1e-6);
+
+        // Circular wrap-around across boundary
+        // from ~3.10 rad to -3.10 rad: counter-clockwise difference is ~0.083 rad
+        let diff = angle_diff(3.10, -3.10);
+        let expected = (-3.10 - 3.10) + std::f32::consts::TAU;
+        assert!((diff - expected).abs() < 1e-5);
+
+        // Opposite directions: should be +/- PI
+        assert!((angle_diff(0.0, PI).abs() - PI).abs() < 1e-6);
+        assert!((angle_diff(PI, 0.0).abs() - PI).abs() < 1e-6);
+
+        // Full circle rotations
+        assert!((angle_diff(0.0, std::f32::consts::TAU)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spring_arm_decoupled_pivot_follow() {
+        let mut arm = SpringArmState::default();
+        let target1 = Vec3::new(10.0, 5.0, -10.0);
+
+        // First update initializes immediately
+        let p1 = arm.update_pivot(target1, 0.016);
+        assert_eq!(p1, target1);
+        assert!(arm.pivot_initialized);
+
+        // Step change on target
+        let target2 = Vec3::new(20.0, 15.0, -20.0);
+        let dt = 0.05;
+        let p2 = arm.update_pivot(target2, dt);
+
+        let h_expected_factor = 1.0 - (-SpringArmState::HORIZONTAL_FOLLOW_RATE * dt).exp();
+        let v_expected_factor = 1.0 - (-SpringArmState::VERTICAL_FOLLOW_RATE * dt).exp();
+
+        // Horizontal follow rate (14.0) should be noticeably faster than vertical (6.0)
+        assert!(h_expected_factor > v_expected_factor);
+
+        let expected_x = 10.0 + (20.0 - 10.0) * h_expected_factor;
+        let expected_z = -10.0 + (-20.0 - (-10.0)) * h_expected_factor;
+        let expected_y = 5.0 + (15.0 - 5.0) * v_expected_factor;
+
+        assert!((p2.x - expected_x).abs() < 1e-5);
+        assert!((p2.z - expected_z).abs() < 1e-5);
+        assert!((p2.y - expected_y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_spring_arm_asymmetric_collision_distance_easing() {
+        let mut arm = SpringArmState::default();
+        // Initialize
+        arm.update_pivot(Vec3::ZERO, 0.016);
+        arm.update_dist(2.7, 0.016);
+        assert_eq!(arm.current_dist, 2.7);
+
+        let dt = 0.05;
+        // 1. Obstruction detected: target distance drops (snap-in at 24.0)
+        let obstructed_dist = 1.0;
+        let dist_after_obstruction = arm.update_dist(obstructed_dist, dt);
+        let snap_factor = 1.0 - (-SpringArmState::COLLISION_SNAP_RATE * dt).exp();
+        let expected_obstructed = 2.7 + (1.0 - 2.7) * snap_factor;
+        assert!((dist_after_obstruction - expected_obstructed).abs() < 1e-5);
+
+        // 2. Clearance restored: target distance increases (smooth ease-out at 8.0)
+        let cleared_dist = 2.7;
+        let dist_before_clearance = arm.current_dist;
+        let dist_after_clearance = arm.update_dist(cleared_dist, dt);
+        let ease_factor = 1.0 - (-SpringArmState::CLEARANCE_EASE_RATE * dt).exp();
+        let expected_cleared =
+            dist_before_clearance + (cleared_dist - dist_before_clearance) * ease_factor;
+        assert!((dist_after_clearance - expected_cleared).abs() < 1e-5);
+
+        // Verification: snap-in rate (24.0) reacts much faster per unit time than ease-out (8.0)
+        assert!(snap_factor > ease_factor);
+    }
+}
+

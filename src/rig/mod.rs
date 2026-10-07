@@ -1368,6 +1368,126 @@ fn solve_arm(target: Vec3, hint: Vec3) -> (Quat, f32) {
     (Quat::from_axis_angle(dir, twist) * r1, bend)
 }
 
+/// Two-bone leg IK: analytic 2-bone IK computing thigh pitch and knee bend
+/// using the law of cosines, mirroring `solve_arm`.
+/// Returns `(thigh_pitch, knee_angle)` in radians.
+#[allow(dead_code)]
+pub fn solve_leg(hip: Vec3, target_foot: Vec3, thigh_len: f32, shin_len: f32) -> (f32, f32) {
+    let target = target_foot - hip;
+    let a = thigh_len;
+    let b = shin_len;
+    let d = (target.y * target.y + target.z * target.z)
+        .sqrt()
+        .clamp((a - b).abs() + 0.001, a + b - 0.002);
+
+    // Law of cosines for knee bend angle:
+    // With forward kinematics: knee is bent backward around +X by -bend angle.
+    // Length squared = a^2 + b^2 - 2 * a * b * cos(PI - bend) = a^2 + b^2 + 2 * a * b * cos(bend)
+    // Actually:
+    // Thigh goes from (0,0) to (0, -a) in local frame.
+    // Shin bends around +X by -knee, so it goes to (0, -b * cos(knee), b * sin(knee)).
+    // Vector from hip: (0, -a - b * cos(knee), b * sin(knee)).
+    // Length squared: (-a - b * cos(knee))^2 + (b * sin(knee))^2
+    // = a^2 + 2*a*b*cos(knee) + b^2*cos^2(knee) + b^2*sin^2(knee)
+    // = a^2 + b^2 + 2*a*b*cos(knee)
+    // Wait! In solve_arm:
+    // reach = (0, -a - b*cos(bend), -b*sin(bend))
+    // (-a - b*cos(bend))^2 + (-b*sin(bend))^2 = a^2 + b^2 + 2*a*b*cos(bend)
+    // If d^2 = a^2 + b^2 + 2*a*b*cos(bend), then cos(bend) = (d^2 - a^2 - b^2) / (2*a*b).
+    // When bend = 0 (straight leg), d = a + b, d^2 = (a+b)^2 = a^2 + b^2 + 2ab -> cos(bend) = 1, bend = 0!
+    // And when bend > 0, d < a + b.
+    let cos_bend = ((d * d - a * a - b * b) / (2.0 * a * b)).clamp(-1.0, 1.0);
+    let knee = cos_bend.acos();
+
+    // In the local thigh frame (thigh angle = 0), the unrotated foot position is:
+    // foot_local = (y_local, z_local) = (-a - b * cos(knee), b * sin(knee))
+    let y_local = -a - b * knee.cos();
+    let z_local = b * knee.sin();
+
+    // We want: Quat::from_rotation_x(thigh) * (0, y_local, z_local) = (0, target.y, target.z)
+    // Rotating (y_local, z_local) around +X by thigh angle gives:
+    // y_target = y_local * cos(thigh) - z_local * sin(thigh)
+    // z_target = y_local * sin(thigh) + z_local * cos(thigh)
+    // Notice this is rotation of 2D vector (y_local, z_local) by angle `thigh`:
+    // angle_local = atan2(z_local, y_local)
+    // angle_target = atan2(target.z, target.y)
+    // thigh = angle_target - angle_local
+    let angle_local = z_local.atan2(y_local);
+    let angle_target = target.z.atan2(target.y);
+    let thigh = angle_target - angle_local;
+
+    (thigh, knee)
+}
+
+/// Procedural Foot Placement & Pelvis IK for Stairs and Slopes.
+///
+/// Smooths body root height with exponential decay `BODY_SETTLE = 18.0`.
+/// Computes pelvis sink: `sink = min(lift_l, lift_r, 0.0)` so that the lowest foot
+/// can reach the ground on stairs or ramps without hyperextending.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct ProceduralFootIK {
+    pub smoothed_root_y: f32,
+    pub body_settle: f32,
+}
+
+#[allow(dead_code)]
+impl Default for ProceduralFootIK {
+    fn default() -> Self {
+        Self::new(0.0)
+    }
+}
+
+#[allow(dead_code)]
+impl ProceduralFootIK {
+    pub const BODY_SETTLE: f32 = 18.0;
+
+    pub fn new(initial_root_y: f32) -> Self {
+        Self {
+            smoothed_root_y: initial_root_y,
+            body_settle: Self::BODY_SETTLE,
+        }
+    }
+
+    /// Updates smoothed root height and computes pelvis sink and clamped foot lift targets.
+    ///
+    /// - `dt`: delta time in seconds.
+    /// - `raw_root_y`: current un-smoothed body root height reference.
+    /// - `foot_target_l`: left foot sampled ground target (world or relative offset).
+    /// - `foot_target_r`: right foot sampled ground target.
+    ///
+    /// Returns `(pelvis_sink, clamped_lift_l, clamped_lift_r)` where:
+    /// - `pelvis_sink`: <= 0.0 delta adjustment to sink the pelvis down.
+    /// - `clamped_lift_l` / `clamped_lift_r`: leg lift adjustments relative to the sunk pelvis.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        raw_root_y: f32,
+        foot_target_l: f32,
+        foot_target_r: f32,
+    ) -> (f32, f32, f32) {
+        // Exponential decay smoothing for root height
+        let decay = (1.0 - (-self.body_settle * dt).exp()).clamp(0.0, 1.0);
+        self.smoothed_root_y += (raw_root_y - self.smoothed_root_y) * decay;
+
+        // Foot offsets relative to smoothed body root height
+        let lift_l = foot_target_l - self.smoothed_root_y;
+        let lift_r = foot_target_r - self.smoothed_root_y;
+
+        // Pelvis sink: sink = min(lift_l, lift_r, 0.0)
+        let pelvis_sink = lift_l.min(lift_r).min(0.0);
+
+        // Clamped leg lift targets relative to sunken pelvis:
+        // Since pelvis dropped by `pelvis_sink`, foot height relative to pelvis is lift - pelvis_sink >= 0.0
+        let max_lift = 0.55;
+        let clamped_l = (lift_l - pelvis_sink).clamp(0.0, max_lift);
+        let clamped_r = (lift_r - pelvis_sink).clamp(0.0, max_lift);
+
+        (pelvis_sink, clamped_l, clamped_r)
+    }
+}
+
+
 #[allow(clippy::type_complexity)]
 fn animate(
     time: Res<Time>,
@@ -1663,5 +1783,83 @@ mod tests {
             println!("{t:?} -> {end:?} bend {b}");
             assert!(end.distance(t) < 0.01);
         }
+    }
+
+    #[test]
+    fn solve_leg_reaches_and_clamps() {
+        let thigh_len = 0.45;
+        let shin_len = 0.45;
+        let hip = v(0.0, 0.98, 0.0);
+
+        // Forward and down target reachable within kinematic chain
+        let targets = [
+            v(0.0, 0.30, -0.35),
+            v(0.0, 0.15, -0.10),
+            v(0.0, 0.45, -0.45),
+            v(0.0, 0.20, 0.15),
+        ];
+
+        for &target in &targets {
+            let (thigh, knee) = solve_leg(hip, target, thigh_len, shin_len);
+            // Verify forward kinematics in hip-local coordinates
+            // Thigh bone: from hip along thigh rotation
+            let thigh_vec = Quat::from_rotation_x(thigh) * v(0.0, -thigh_len, 0.0);
+            // Shin bone: from knee rotated by knee angle
+            let shin_vec = Quat::from_rotation_x(thigh) * Quat::from_rotation_x(-knee) * v(0.0, -shin_len, 0.0);
+            let foot_pos = hip + thigh_vec + shin_vec;
+
+            // Target Y and Z should match forward kinematics within 0.01
+            assert!(
+                (foot_pos.y - target.y).abs() < 0.01,
+                "Y error too large for {target:?}: got {foot_pos:?}"
+            );
+            assert!(
+                (foot_pos.z - target.z).abs() < 0.01,
+                "Z error too large for {target:?}: got {foot_pos:?}"
+            );
+        }
+
+        // Target out of reach (too far): should clamp smoothly without NaN or panic
+        let far_target = v(0.0, -0.5, -0.5);
+        let (thigh_far, knee_far) = solve_leg(hip, far_target, thigh_len, shin_len);
+        assert!(!thigh_far.is_nan() && !knee_far.is_nan());
+        // Fully extended -> knee close to 0 (within clamped extension margin)
+        assert!(knee_far.abs() < 0.15);
+
+        // Target too close (under minimal reach): should clamp smoothly without NaN
+        let close_target = v(0.0, 0.97, 0.0);
+        let (thigh_close, knee_close) = solve_leg(hip, close_target, thigh_len, shin_len);
+        assert!(!thigh_close.is_nan() && !knee_close.is_nan());
+    }
+
+    #[test]
+    fn procedural_foot_ik_pelvis_sink() {
+        let mut ik = ProceduralFootIK::new(0.0);
+
+        // Scenario 1: Flat level ground at 0.0
+        let (sink_flat, lift_l, lift_r) = ik.update(0.1, 0.0, 0.0, 0.0);
+        assert_eq!(sink_flat, 0.0);
+        assert_eq!(lift_l, 0.0);
+        assert_eq!(lift_r, 0.0);
+
+        // Scenario 2: One foot on stair below ground (-0.2m) and one at 0.0
+        // Pelvis sink should sink to lowest foot: sink = min(-0.2, 0.0, 0.0) = -0.2
+        let (sink_stairs, l_lift, r_lift) = ik.update(0.1, 0.0, -0.2, 0.0);
+        assert!((sink_stairs - (-0.2)).abs() < 1e-4);
+        assert_eq!(l_lift, 0.0); // lowest foot reaches ground with no extra lift
+        assert!((r_lift - 0.2).abs() < 1e-4); // higher foot lifts relative to sunken pelvis
+
+        // Scenario 3: Right foot lower (-0.35m)
+        let (sink_r, l_lift2, r_lift2) = ik.update(0.1, 0.0, 0.1, -0.35);
+        assert!((sink_r - (-0.35)).abs() < 1e-4);
+        assert!((l_lift2 - 0.45).abs() < 1e-4);
+        assert_eq!(r_lift2, 0.0);
+
+        // Scenario 4: Both feet elevated above reference (e.g. stepping up a ledge +0.15m and +0.3m)
+        // Pelvis should NOT sink when both feet are above (sink <= 0.0)
+        let (sink_up, l_up, r_up) = ik.update(0.1, 0.0, 0.15, 0.3);
+        assert_eq!(sink_up, 0.0);
+        assert!((l_up - 0.15).abs() < 1e-4);
+        assert!((r_up - 0.3).abs() < 1e-4);
     }
 }

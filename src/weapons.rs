@@ -13,7 +13,7 @@ use crate::data::{
 };
 use crate::fx::{Fx, FxQueue};
 use crate::game::Paused;
-use crate::physics::{collect_boxes, trace_shot};
+use crate::physics::{collect_boxes, segment_distance, trace_shot};
 use crate::player::{can_act, LocalPlayer};
 use crate::{
     AppState, Collider, Enemy, MatchState, Phase, PlayerAction, Replicated, Roster, Session, Shot,
@@ -122,6 +122,7 @@ pub struct Loadout {
     pub melee: Option<f32>,
     melee_cd: f32,
     melee_struck: bool,
+    pub melee_buffered: bool,
     /// Seconds left to show the kill marker.
     pub kill_marker: f32,
     last_kills: u32,
@@ -365,6 +366,7 @@ fn melee(
     roster: Res<Roster>,
     state: Res<MatchState>,
     paused: Res<Paused>,
+    mut hit_stop: ResMut<crate::feel::HitStop>,
     mut counter: ResMut<crate::abilities::ActionCounter>,
     mut actions: ResMut<crate::ActionQueue>,
     mut loadout: ResMut<Loadout>,
@@ -412,10 +414,21 @@ fn melee(
                 // Melee strike impact: camera punch jolt & knife slash follow-through
                 p.kick -= 0.035;
                 p.roll += 0.015;
+                hit_stop.trigger(0.045);
             }
         }
+        if keys.tapped(&settings, Action::Melee) && t >= MELEE_TIME * 0.50 {
+            loadout.melee_buffered = true;
+        }
         if t >= MELEE_TIME {
-            loadout.melee = None;
+            if loadout.melee_buffered {
+                loadout.melee = Some(0.0);
+                loadout.melee_struck = false;
+                loadout.melee_buffered = false;
+                loadout.melee_cd = MELEE_TIME + 0.1;
+            } else {
+                loadout.melee = None;
+            }
         }
         return;
     }
@@ -434,17 +447,27 @@ fn melee(
 }
 
 /// Distance to an enemy if a swing from `origin` along `dir` reaches it.
+/// Sweeps the player's weapon reach segment against the enemy's vertical cylinder/capsule axis,
+/// fixing melee misses on crouching/crawling enemies and jumping players.
 pub fn melee_reach(origin: Vec3, dir: Vec3, feet: Vec3, scale: f32, crawl: bool) -> Option<f32> {
-    let chest = feet + Vec3::Y * if crawl { 0.35 } else { 1.0 * scale };
-    let to = chest - origin;
-    let flat = to.with_y(0.0);
-    let dist = flat.length();
-    let reach = MELEE_RANGE + 0.25 * (scale - 1.0);
-    // In front of you (a wide arc), within reach and not far above or below.
-    let facing = flat
-        .normalize_or_zero()
-        .dot(dir.with_y(0.0).normalize_or_zero());
-    (dist < reach && (facing > 0.45 || dist < 0.7) && to.y.abs() < 1.8).then_some(dist)
+    let reach_len = MELEE_RANGE + 0.25 * (scale - 1.0);
+    let reach_end = origin + dir * reach_len;
+    let height = if crawl { 0.5 * scale } else { 1.8 * scale };
+    let enemy_base = feet;
+    let enemy_top = feet + Vec3::Y * height;
+    let enemy_radius = 0.55 * scale;
+
+    let dist = segment_distance(origin, reach_end, enemy_base, enemy_top);
+    if dist <= enemy_radius {
+        // Also ensure enemy is roughly in front or close by in 3D
+        let to_enemy = (feet + Vec3::Y * (height * 0.5)) - origin;
+        let to_dist = to_enemy.length();
+        let facing = dir.dot(to_enemy.normalize_or_zero());
+        if facing > 0.25 || to_dist < 1.0 {
+            return Some(to_dist);
+        }
+    }
+    None
 }
 
 pub fn fire(
@@ -704,3 +727,191 @@ pub fn fire(
         loadout.headshot = head;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_melee_reach_standing_enemy() {
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let dir = Vec3::Z;
+        let enemy_feet = Vec3::new(0.0, 0.0, 1.5);
+        let hit = melee_reach(eye, dir, enemy_feet, 1.0, false);
+        assert!(hit.is_some(), "Should hit standing enemy 1.5m in front");
+    }
+
+    #[test]
+    fn test_melee_reach_crawling_enemy() {
+        // Crawling enemy is very low on the ground (height 0.5)
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        // Player looking slightly down towards crawling zombie
+        let dir = Vec3::new(0.0, -0.6, 1.0).normalize();
+        let enemy_feet = Vec3::new(0.0, 0.0, 1.5);
+        let hit = melee_reach(eye, dir, enemy_feet, 1.0, true);
+        assert!(hit.is_some(), "Should hit crawling enemy when looking down");
+    }
+
+    #[test]
+    fn test_melee_reach_jumping_player() {
+        // Player has jumped up (eye at y = 2.8) and is looking down-forward at standing zombie
+        let eye = Vec3::new(0.0, 2.8, 0.0);
+        let dir = Vec3::new(0.0, -0.6, 1.0).normalize();
+        let enemy_feet = Vec3::new(0.0, 0.0, 1.5);
+        let hit = melee_reach(eye, dir, enemy_feet, 1.0, false);
+        assert!(hit.is_some(), "Jumping player swinging downward should hit standing enemy");
+    }
+
+    #[test]
+    fn test_melee_reach_out_of_range_or_behind() {
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let dir = Vec3::Z;
+        // Enemy is 5m away (beyond MELEE_RANGE)
+        let far_feet = Vec3::new(0.0, 0.0, 5.0);
+        assert!(melee_reach(eye, dir, far_feet, 1.0, false).is_none());
+
+        // Enemy is behind the player
+        let behind_feet = Vec3::new(0.0, 0.0, -1.5);
+        assert!(melee_reach(eye, dir, behind_feet, 1.0, false).is_none());
+    }
+
+    #[test]
+    fn test_melee_input_buffering_during_recovery() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(16),
+        ));
+        app.insert_resource(Settings::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(Session::default());
+        app.insert_resource(Roster::default());
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Paused::default());
+        app.insert_resource(crate::feel::HitStop::default());
+        app.insert_resource(crate::abilities::ActionCounter::default());
+        app.insert_resource(crate::ActionQueue::default());
+
+        app.insert_resource(Loadout::default());
+
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.world_mut().spawn((
+            Transform::IDENTITY,
+            LocalPlayer::default(),
+        ));
+
+        app.add_systems(Update, melee);
+        app.update(); // Initialize Bevy time delta
+
+        {
+            let mut loadout = app.world_mut().resource_mut::<Loadout>();
+            // Active swing in windup before recovery window (t = 0.20 < MELEE_TIME * 0.50 = 0.25)
+            loadout.melee = Some(0.20);
+            loadout.melee_buffered = false;
+        }
+
+        // Tap melee key while t < 0.25 -> should NOT buffer
+        {
+            let key = app.world().resource::<Settings>().key(Action::Melee);
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(key);
+        }
+        app.update();
+
+        let loadout = app.world().resource::<Loadout>();
+        assert!(
+            !loadout.melee_buffered,
+            "Melee tap before recovery window (t < 0.25) should not buffer"
+        );
+
+        // Release the key on the intermediate update so the next press registers as just_pressed
+        {
+            let key = app.world().resource::<Settings>().key(Action::Melee);
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(key);
+        }
+        app.update();
+
+        // Advance melee swing into recovery window: t >= MELEE_TIME * 0.50 (0.25)
+        {
+            let mut loadout = app.world_mut().resource_mut::<Loadout>();
+            loadout.melee = Some(0.26);
+            loadout.melee_buffered = false;
+        }
+
+        // Tap melee key during recovery window
+        {
+            let key = app.world().resource::<Settings>().key(Action::Melee);
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(key);
+        }
+        app.update();
+
+        let loadout = app.world().resource::<Loadout>();
+        assert!(
+            loadout.melee_buffered,
+            "Melee tap during recovery window (t >= 0.25) should set melee_buffered = true"
+        );
+    }
+
+    #[test]
+    fn test_melee_buffered_strike_chains_immediately() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // Step dt = 0.05s
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(50),
+        ));
+        app.insert_resource(Settings::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(Session::default());
+        app.insert_resource(Roster::default());
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Paused::default());
+        app.insert_resource(crate::feel::HitStop::default());
+        app.insert_resource(crate::abilities::ActionCounter::default());
+        app.insert_resource(crate::ActionQueue::default());
+        app.insert_resource(Loadout::default());
+
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.world_mut().spawn((
+            Transform::IDENTITY,
+            LocalPlayer::default(),
+        ));
+
+        app.add_systems(Update, melee);
+        app.update(); // Initialize Bevy time delta
+
+        {
+            let mut loadout = app.world_mut().resource_mut::<Loadout>();
+            // At t = 0.48s, swing is buffered; delta of 0.05s brings t to 0.53s >= MELEE_TIME (0.50s)
+            loadout.melee = Some(0.48);
+            loadout.melee_struck = true;
+            loadout.melee_buffered = true;
+        }
+
+        app.update();
+
+        let loadout = app.world().resource::<Loadout>();
+        assert_eq!(
+            loadout.melee,
+            Some(0.0),
+            "Buffered melee strike should immediately restart at Some(0.0)"
+        );
+        assert!(
+            !loadout.melee_struck,
+            "melee_struck should reset to false for the new strike"
+        );
+        assert!(
+            !loadout.melee_buffered,
+            "melee_buffered should be cleared to false"
+        );
+        assert!(
+            (loadout.melee_cd - (MELEE_TIME + 0.1)).abs() < 1e-4,
+            "melee_cd should be set to MELEE_TIME + 0.1 ({}), got {}",
+            MELEE_TIME + 0.1,
+            loadout.melee_cd
+        );
+    }
+}
+
