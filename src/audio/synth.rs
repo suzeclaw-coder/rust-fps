@@ -42,6 +42,27 @@ impl Lp {
     }
 }
 
+/// One-pole high-pass filter.
+pub struct Hp {
+    x_prev: f32,
+    y: f32,
+}
+
+impl Hp {
+    pub fn new() -> Self {
+        Self { x_prev: 0.0, y: 0.0 }
+    }
+    pub fn run(&mut self, x: f32, cutoff: f32) -> f32 {
+        let rc = 1.0 / (TAU * cutoff.clamp(10.0, RATE as f32 * 0.45));
+        let dt = 1.0 / RATE as f32;
+        let alpha = rc / (rc + dt);
+        let y = alpha * (self.y + x - self.x_prev);
+        self.x_prev = x;
+        self.y = y;
+        y
+    }
+}
+
 /// Resonant band-pass (biquad, constant peak gain).
 pub struct Bp {
     x1: f32,
@@ -217,21 +238,184 @@ pub struct ShotRecipe {
     pub echo: f32,
 }
 
+/// A low-end sub-bass thump: a pitch-dropping sine wave with fast exponential decay
+/// (e.g. 90 Hz dropping to 35 Hz) providing visceral low-end punch.
+pub fn sub_thump(start_hz: f32, end_hz: f32, decay_tau: f32, len: f32) -> Buf {
+    let mut o = Osc::new();
+    render(len, |t| {
+        let drop = decay(t, decay_tau * 0.45);
+        let freq = end_hz + (start_hz - end_hz) * drop;
+        o.sine(freq) * decay(t, decay_tau)
+    })
+    .normalize(0.95)
+}
+
 pub fn gunshot(r: &ShotRecipe, seed: u32) -> Buf {
     let mut n = Noise::new(seed);
-    let mut lp = Lp::new();
-    let mut lp2 = Lp::new();
-    let mut o = Osc::new();
-    let len = r.tail * 4.0 + 0.05;
+    let mut hp = Hp::new();
+    let mut bp_snap = Bp::new();
+    let mut lp_body = Lp::new();
+    let mut bp_bark = Bp::new();
+    let mut lp_rumble = Lp::new();
+    let mut osc_thump = Osc::new();
+    let mut osc_sub = Osc::new();
+
+    let len = (r.tail * 4.5 + 0.12).max(0.35);
+
     let b = render(len, |t| {
         let x = n.next();
-        let crack = x * decay(t, 0.0025);
-        let blast = lp.run(x, r.bright * (0.35 + 0.65 * decay(t, 0.03))) * decay(t, r.tail);
-        let thump = o.sine(r.body * (1.0 + 2.5 * decay(t, 0.012))) * decay(t, r.tail * 0.9);
-        let rumble = lp2.run(x, 300.0) * decay(t, r.tail * 2.5) * 0.6;
-        crack * 0.8 + blast * 1.3 + thump * 0.9 + rumble
+
+        // 1. Transient supersonic crack & mechanical snap (first 2-5ms)
+        let crack_raw = hp.run(x, 2200.0) * decay(t, 0.0028) * 2.2;
+        let snap_metal = bp_snap.run(x, (r.bright * 0.9).clamp(2400.0, 7500.0), 4.5)
+            * decay(t, 0.0045)
+            * 1.8;
+        let transient = crack_raw + snap_metal;
+
+        // 2. Concussive body & saturated mid bark
+        // Resonant blast swept downward
+        let blast_freq = r.bright * (0.3 + 0.7 * decay(t, 0.025));
+        let blast = lp_body.run(x, blast_freq) * decay(t, r.tail * 0.95);
+        // Resonant explosive bark (tanh saturation)
+        let bark_raw = bp_bark.run(x, (r.body * 2.6).clamp(180.0, 900.0), 2.2)
+            * decay(t, r.tail * 0.6)
+            * 2.5;
+        let concussive_body = (blast * 1.5 + bark_raw).tanh();
+
+        // 3. Low-end body & sub-bass thump
+        let thump_freq = r.body * (1.0 + 2.8 * decay(t, 0.016));
+        let thump = osc_thump.sine(thump_freq) * decay(t, r.tail * 0.85);
+        let sub = osc_sub.sine(48.0 + 36.0 * decay(t, 0.04)) * decay(t, r.tail * 1.4) * 0.8;
+
+        // 4. Lingering low rumble
+        let rumble = lp_rumble.run(x, 240.0) * decay(t, r.tail * 2.6) * 0.7;
+
+        transient * 1.1 + concussive_body * 1.4 + thump * 1.0 + sub + rumble
     });
-    b.echo(0.09, r.echo, 3).normalize(0.95)
+
+    // Dual-tap acoustic room / outdoor reverberation tail
+    b.echo(0.045, (r.echo * 0.65).min(0.35), 2)
+        .echo(0.098, (r.echo * 0.85).min(0.45), 3)
+        .normalize(0.98)
+}
+
+/// Gunshot layered with a deep concussive sub-bass thump and acoustic wallop.
+pub fn heavy_gunshot(r: &ShotRecipe, seed: u32, thump_start: f32, thump_end: f32) -> Buf {
+    let shot = gunshot(r, seed);
+    let thump = sub_thump(
+        thump_start,
+        thump_end,
+        (r.tail * 0.85).max(0.08),
+        (r.tail * 3.0 + 0.1).max(0.28),
+    );
+    // Add extra mechanical concussive slap
+    let mut n = Noise::new(seed.wrapping_add(101));
+    let mut hp = Hp::new();
+    let slap = render(0.08, |t| {
+        hp.run(n.next(), 3200.0) * decay(t, 0.003) * 1.4
+    });
+    shot.mix(&thump, 0.0, 1.2)
+        .mix(&slap, 0.0, 0.5)
+        .normalize(0.98)
+}
+
+/// M1911 Pistol: Crisp metallic slide/action snap transient + punchy pop.
+pub fn pistol_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 185.0,
+        tail: 0.055,
+        bright: 5200.0,
+        echo: 0.28,
+    };
+    let shot = gunshot(&recipe, seed);
+    let action_click = click(3400.0, seed.wrapping_add(201), 0.03);
+    shot.mix(&action_click, 0.001, 0.6).normalize(0.96)
+}
+
+/// Magnum / Revolver: Thunderous, concussive hand-cannon roar with heavy sub thump & metallic ring.
+pub fn magnum_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 110.0,
+        tail: 0.12,
+        bright: 3800.0,
+        echo: 0.48,
+    };
+    let shot = heavy_gunshot(&recipe, seed, 105.0, 36.0);
+    // Cylinder / frame resonant ring overtone
+    let ring = bell(&[(2850.0, 0.5, 0.08), (4280.0, 0.3, 0.04)], 0.15);
+    shot.mix(&ring, 0.003, 0.35).normalize(0.98)
+}
+
+/// SMG: Rapid, snappy, tight muzzle crack with crisp mechanical action cycling.
+pub fn smg_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 220.0,
+        tail: 0.042,
+        bright: 6200.0,
+        echo: 0.22,
+    };
+    let shot = gunshot(&recipe, seed);
+    let bolt_click = click(4200.0, seed.wrapping_add(301), 0.025);
+    shot.mix(&bolt_click, 0.001, 0.7).normalize(0.95)
+}
+
+/// Assault Rifle: Punchy staccato bark with snappy brassy transients and solid low punch.
+pub fn rifle_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 135.0,
+        tail: 0.075,
+        bright: 4600.0,
+        echo: 0.36,
+    };
+    let shot = gunshot(&recipe, seed);
+    let thump = sub_thump(110.0, 45.0, 0.065, 0.2);
+    shot.mix(&thump, 0.0, 0.7).normalize(0.97)
+}
+
+/// Shotgun: Devastating close-range blast, massive low-end wallop, wide acoustic roar.
+pub fn shotgun_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 72.0,
+        tail: 0.16,
+        bright: 2800.0,
+        echo: 0.52,
+    };
+    let shot = heavy_gunshot(&recipe, seed, 92.0, 28.0);
+    let spread_crack = render(0.06, {
+        let mut n = Noise::new(seed.wrapping_add(401));
+        let mut bp = Bp::new();
+        move |t| bp.run(n.next(), 1800.0, 1.2) * decay(t, 0.008) * 1.8
+    });
+    shot.mix(&spread_crack, 0.0, 0.8).normalize(0.98)
+}
+
+/// LMG: Heavy sustained hammer, deep thumping punch and echoing rattle.
+pub fn lmg_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 105.0,
+        tail: 0.09,
+        bright: 4000.0,
+        echo: 0.40,
+    };
+    heavy_gunshot(&recipe, seed, 100.0, 36.0)
+}
+
+/// Sniper Rifle: Deafening high-powered explosion with massive sub shockwave and long rolling outdoor thunder tail.
+pub fn sniper_shot(seed: u32) -> Buf {
+    let recipe = ShotRecipe {
+        body: 82.0,
+        tail: 0.22,
+        bright: 3400.0,
+        echo: 0.65,
+    };
+    let shot = heavy_gunshot(&recipe, seed, 96.0, 26.0);
+    // Lingering rolling thunder tail
+    let mut n = Noise::new(seed.wrapping_add(501));
+    let mut lp = Lp::new();
+    let roll = render(0.7, |t| {
+        lp.run(n.next(), 400.0 * decay(t, 0.2) + 80.0) * env(t, 0.04, 0.35) * 1.3
+    });
+    shot.mix(&roll, 0.06, 0.85).normalize(0.99)
 }
 
 /// A gun fitted with a suppressor: a dull "thup" and a mechanical clack.
@@ -265,7 +449,7 @@ pub fn thunder(seed: u32) -> Buf {
     let mut lp = Lp::new();
     let mut o = Osc::new();
     let mut spark = 0.0f32;
-    render(0.9, |t| {
+    let base = render(0.9, |t| {
         let x = n.next();
         if n.next() > 0.995 {
             spark = 1.0;
@@ -274,8 +458,9 @@ pub fn thunder(seed: u32) -> Buf {
         lp.run(x, 1800.0 * decay(t, 0.1) + 120.0) * env(t, 0.003, 0.25) * 1.2
             + x * spark * decay(t, 0.4) * 0.6
             + o.sine(48.0) * decay(t, 0.3) * 0.8
-    })
-    .normalize(0.95)
+    });
+    let thump = sub_thump(90.0, 35.0, 0.18, 0.65);
+    base.mix(&thump, 0.0, 1.0).normalize(0.95)
 }
 
 /// Small mechanical click (bolts, magazines, triggers).
@@ -433,6 +618,124 @@ pub fn melody(notes: &[(f32, f32)], note_len: f32) -> Buf {
     out.normalize(0.6)
 }
 
+/// Meaty CoD Zombies hitmarker: low-mid flesh thud/squelch + crisp mechanical 'thwip/tick' transient.
+pub fn hitmarker_tick(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp_tick = Bp::new();
+    let mut hp_snap = Hp::new();
+    let mut osc_thud = Osc::new();
+    let mut lp_squish = Lp::new();
+
+    render(0.09, |t| {
+        let x = n.next();
+        // Crisp mechanical 'thwip/tick' transient (first 2-4ms)
+        let tick = bp_tick.run(x, 4400.0, 4.0) * decay(t, 0.0035) * 2.2
+            + hp_snap.run(x, 5600.0) * decay(t, 0.0018) * 1.6;
+
+        // Low-mid fleshy impact thud (180 Hz dropping to 70 Hz)
+        let thud_freq = 70.0 + 110.0 * decay(t, 0.015);
+        let thud = osc_thud.sine(thud_freq) * decay(t, 0.045) * 1.5;
+
+        // Subtle wet squelch body
+        let squelch = lp_squish.run(x, 1400.0 * decay(t, 0.02) + 250.0) * decay(t, 0.035) * 1.1;
+
+        tick * 1.2 + thud + squelch
+    })
+    .normalize(0.92)
+}
+
+/// Visceral skull-pop headshot: sharp bone fracture snap + wet fleshy gore burst + crisp confirmation ring.
+pub fn skull_pop(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp_crack = Bp::new();
+    let mut bp_crack2 = Bp::new();
+    let mut lp_gore = Lp::new();
+    let mut hp = Hp::new();
+    let mut osc_gore = Osc::new();
+    let mut osc_sub = Osc::new();
+    let mut osc_bell1 = Osc::new();
+    let mut osc_bell2 = Osc::new();
+    let mut osc_bell3 = Osc::new();
+
+    render(0.24, |t| {
+        let x = n.next();
+
+        // 1. Sharp bone fracture snap (crunchy high-Q transient crackle)
+        let snap1 = bp_crack.run(x, 3200.0, 3.2) * decay(t, 0.004) * 2.4;
+        let snap2 = bp_crack2.run(x, 5400.0, 4.0) * decay(t, 0.0025) * 2.0;
+        let crackle = hp.run(x, 4000.0) * if n.next() > 0.85 { 1.8 } else { 0.2 } * decay(t, 0.018);
+        let bone_break = snap1 + snap2 + crackle;
+
+        // 2. Wet fleshy gore burst & squelch
+        let gore_fm = 240.0 + 160.0 * osc_gore.sine(45.0);
+        let gore = lp_gore.run(x, gore_fm * (1.0 + 2.0 * decay(t, 0.03))) * decay(t, 0.07) * 2.2;
+        let gore_thump = osc_sub.sine(85.0 + 40.0 * decay(t, 0.02)) * decay(t, 0.055) * 1.3;
+
+        // 3. Crisp confirmation chime/ring (iconic reward ding overtone)
+        let ring1 = osc_bell1.sine(2793.8) * decay(t, 0.16) * 0.9; // F7-ish
+        let ring2 = osc_bell2.sine(4186.0) * decay(t, 0.11) * 0.55; // C8-ish
+        let ring3 = osc_bell3.sine(5587.6) * decay(t, 0.06) * 0.35;
+        let confirmation = ring1 + ring2 + ring3;
+
+        bone_break * 1.4 + gore * 1.3 + gore_thump + confirmation * 1.1
+    })
+    .normalize(0.96)
+}
+
+/// Heavy, squishy bone-breaking zombie kill finish sound.
+pub fn kill_sound(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp_bone = Bp::new();
+    let mut lp_flesh = Lp::new();
+    let mut osc_thud = Osc::new();
+    let mut osc_drop = Osc::new();
+
+    let crunch = render(0.18, |t| {
+        let x = n.next();
+        // Heavy skull/bone break snap
+        let bone = bp_bone.run(x, 2200.0, 2.5) * decay(t, 0.008) * 2.5;
+        // Meaty squish finish
+        let squish = lp_flesh.run(x, 1100.0 * decay(t, 0.03) + 200.0) * decay(t, 0.09) * 1.8;
+        // Heavy concussive impact thud
+        let thud = osc_thud.sine(65.0 + 60.0 * decay(t, 0.025)) * decay(t, 0.08) * 1.4;
+        // Satisfying low bass drop
+        let sub = osc_drop.sine(42.0) * decay(t, 0.12) * 1.1;
+
+        bone + squish + thud + sub
+    });
+
+    let bell_confirmation = bell(&[(1480.0, 0.8, 0.08), (2220.0, 0.4, 0.05)], 0.15);
+    crunch.mix(&bell_confirmation, 0.002, 0.5).normalize(0.95)
+}
+
+/// Wet fleshy bullet impact squelch (for zombie hurt audio).
+pub fn flesh_impact(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp_wet = Bp::new();
+    let mut lp_meat = Lp::new();
+    let mut osc_thud = Osc::new();
+
+    render(0.12, |t| {
+        let x = n.next();
+        let slap = bp_wet.run(x, 1600.0, 1.8) * decay(t, 0.006) * 2.0;
+        let squelch = lp_meat.run(x, 800.0 * decay(t, 0.02) + 180.0) * decay(t, 0.06) * 1.5;
+        let thud = osc_thud.sine(120.0 * decay(t, 0.015) + 60.0) * decay(t, 0.05) * 1.2;
+        slap + squelch + thud
+    })
+    .normalize(0.85)
+}
+
+/// A crisp high-frequency metallic "crit / headshot" ding sound.
+#[allow(dead_code)]
+pub fn crit_ding(seed: u32) -> Buf {
+    skull_pop(seed)
+}
+
+#[allow(dead_code)]
+pub fn headshot_ding(seed: u32) -> Buf {
+    skull_pop(seed)
+}
+
 pub fn explosion(seed: u32, size: f32) -> Buf {
     let mut n = Noise::new(seed);
     let mut lp = Lp::new();
@@ -440,7 +743,7 @@ pub fn explosion(seed: u32, size: f32) -> Buf {
     let mut o = Osc::new();
     let mut crackle = 0.0f32;
     let len = 1.2 * size;
-    render(len, |t| {
+    let base = render(len, |t| {
         let x = n.next();
         if n.next() > 0.997 {
             crackle = 1.0;
@@ -450,8 +753,31 @@ pub fn explosion(seed: u32, size: f32) -> Buf {
         let sub = o.sine(42.0 + 30.0 * decay(t, 0.05)) * decay(t, 0.35 * size) * 1.2;
         let debris = lp2.run(x, 2500.0) * crackle * decay(t, 0.6 * size) * 0.5;
         boom + sub + debris
-    })
-    .normalize(1.0)
+    });
+    let punch = sub_thump(90.0, 32.0, 0.16 * size, (0.6 * size).min(len));
+    base.mix(&punch, 0.0, 1.1).normalize(1.0)
+}
+
+/// Boss slam / heavy ground slam: a shockwave blast combined with visceral sub-bass thump and ground rumble.
+pub fn boss_slam(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut lp = Lp::new();
+    let mut bp = Bp::new();
+    let impact = render(0.7, |t| {
+        let x = n.next();
+        let crack = bp.run(x, 1100.0, 1.5) * decay(t, 0.015) * 2.2;
+        let blast = lp.run(x, 550.0 * decay(t, 0.08) + 110.0) * decay(t, 0.35) * 1.5;
+        crack + blast
+    });
+    let thump = sub_thump(95.0, 32.0, 0.22, 0.65);
+    impact
+        .mix(&thump, 0.0, 1.3)
+        .mix(&rumble(0.65, seed + 1), 0.03, 0.75)
+        .normalize(1.0)
+}
+
+pub fn slam(seed: u32) -> Buf {
+    boss_slam(seed)
 }
 
 pub fn zap(seed: u32, len: f32) -> Buf {
@@ -564,6 +890,33 @@ mod tests {
         ok(&rumble(1.0, 10));
         ok(&zap(11, 0.4));
         ok(&fire(12, 1.0));
+        ok(&sub_thump(90.0, 35.0, 0.1, 0.3));
+        ok(&crit_ding(13));
+        ok(&headshot_ding(14));
+        ok(&boss_slam(15));
+        ok(&slam(16));
+        ok(&heavy_gunshot(
+            &ShotRecipe {
+                body: 90.0,
+                tail: 0.16,
+                bright: 3000.0,
+                echo: 0.55,
+            },
+            17,
+            90.0,
+            35.0,
+        ));
+        ok(&pistol_shot(18));
+        ok(&magnum_shot(19));
+        ok(&smg_shot(20));
+        ok(&rifle_shot(21));
+        ok(&shotgun_shot(22));
+        ok(&lmg_shot(23));
+        ok(&sniper_shot(24));
+        ok(&hitmarker_tick(25));
+        ok(&skull_pop(26));
+        ok(&kill_sound(27));
+        ok(&flesh_impact(28));
         let w = gunshot(
             &ShotRecipe {
                 body: 140.0,

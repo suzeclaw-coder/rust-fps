@@ -16,7 +16,7 @@ use crate::data::{
 use crate::sim::TELEPORT_HOLD;
 use crate::game::{match_ended, MatchResult, Overlay};
 use crate::maps::{map_name, CurrentMap};
-use crate::ui::{button, UiAction, ACCENT, PANEL};
+use crate::ui::{button_sized, UiAction, ACCENT, PANEL};
 use crate::weapons::Loadout;
 use crate::{AppState, BoxState, Enemy, InGameEntity, MatchState, Phase, Roster, Session};
 
@@ -31,6 +31,7 @@ impl Plugin for HudPlugin {
                 Update,
                 (
                     update_hud,
+                    update_hitmarker,
                     update_sights,
                     update_prompt,
                     update_banner,
@@ -75,7 +76,13 @@ struct Hitmarker;
 
 /// One of the four slashes of the hit marker.
 #[derive(Component)]
-struct HitmarkerBar;
+struct HitmarkerBar(usize);
+/// Central red flash on hit.
+#[derive(Component)]
+struct HitmarkerCenter;
+/// Lethal kill confirmation emblem/flash.
+#[derive(Component)]
+struct HitmarkerKill;
 #[derive(Component)]
 struct PromptText;
 #[derive(Component)]
@@ -109,9 +116,19 @@ fn text(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, T
     )
 }
 
+/// Direction of each crosshair line for dynamic bloom.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum CrosshairLineDir {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
 /// The four crosshair lines (hidden while aiming down sights).
 #[derive(Component)]
-struct CrosshairLine;
+struct CrosshairLine(CrosshairLineDir);
 
 /// The black scope view shown while looking through a magnified scope.
 #[derive(Component)]
@@ -163,15 +180,18 @@ fn scope_image() -> Image {
     )
 }
 
-/// Hides the crosshair while aiming and shows the scope view when scoped in.
+/// Hides the crosshair while aiming, shows scope overlay, and updates dynamic bloom.
 fn update_sights(
+    time: Res<Time>,
     aim: Res<crate::weapons::Aim>,
+    loadout: Res<crate::weapons::Loadout>,
     player: Single<&crate::player::LocalPlayer>,
-    mut lines: Query<&mut Visibility, (With<CrosshairLine>, Without<ScopeOverlay>)>,
+    mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility), Without<ScopeOverlay>>,
     mut scope: Query<&mut Visibility, (With<ScopeOverlay>, Without<CrosshairLine>)>,
+    mut bloom_smooth: Local<f32>,
 ) {
     let hide = aim.amount > 0.4 || player.third_person();
-    for mut v in &mut lines {
+    for (_, _, mut v) in &mut lines {
         *v = if hide {
             Visibility::Hidden
         } else {
@@ -184,6 +204,57 @@ fn update_sights(
         } else {
             Visibility::Hidden
         };
+    }
+
+    // Dynamic bloom calculation:
+    // Expand during continuous fire (spray/recoil) and player movement/jumping.
+    let speed = player.horizontal_speed();
+    let move_factor = if !player.on_ground {
+        1.8 // jumping / airborne bloom
+    } else if player.sprinting {
+        1.3
+    } else if speed > 1.0 {
+        (speed / 6.0).min(1.0) * 0.7
+    } else if player.crouching {
+        -0.3 // tighter when crouched
+    } else {
+        0.0
+    };
+
+    // Continuous fire bloom from weapon recoil & spray counter
+    let fire_factor = (loadout.recoil * 1.6 + (loadout.spray as f32).min(12.0) * 0.2).min(2.5);
+
+    let target_bloom = (move_factor + fire_factor).clamp(0.0, 3.0);
+    let dt = time.delta_secs();
+    // Quick pop out on shot/jump, smooth precision recovery when stationary
+    let recovery_speed = if target_bloom > *bloom_smooth { 22.0 } else { 11.0 };
+    *bloom_smooth += (target_bloom - *bloom_smooth) * (1.0 - (-recovery_speed * dt).exp());
+
+    let offset = 9.0 * 2.0 + *bloom_smooth * 12.0;
+
+    for (CrosshairLine(dir), mut node, _) in &mut lines {
+        match dir {
+            CrosshairLineDir::Top => {
+                node.margin.left = Val::Px(0.0);
+                node.margin.top = Val::Px(-offset);
+            }
+            CrosshairLineDir::Bottom => {
+                node.margin.left = Val::Px(0.0);
+                node.margin.top = Val::Px(offset);
+            }
+            CrosshairLineDir::Left => {
+                node.margin.left = Val::Px(-offset);
+                node.margin.top = Val::Px(0.0);
+            }
+            CrosshairLineDir::Right => {
+                node.margin.left = Val::Px(offset);
+                node.margin.top = Val::Px(0.0);
+            }
+            CrosshairLineDir::Center => {
+                node.margin.left = Val::Px(0.0);
+                node.margin.top = Val::Px(0.0);
+            }
+        }
     }
 }
 
@@ -260,15 +331,15 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Pickable::IGNORE,
         ))
         .with_children(|c| {
-            for (w, h, x, y) in [
-                (2.0, 7.0, 0.0, -9.0),
-                (2.0, 7.0, 0.0, 9.0),
-                (7.0, 2.0, -9.0, 0.0),
-                (7.0, 2.0, 9.0, 0.0),
-                (2.0, 2.0, 0.0, 0.0),
+            for (w, h, x, y, dir) in [
+                (2.0, 7.0, 0.0, -9.0, CrosshairLineDir::Top),
+                (2.0, 7.0, 0.0, 9.0, CrosshairLineDir::Bottom),
+                (7.0, 2.0, -9.0, 0.0, CrosshairLineDir::Left),
+                (7.0, 2.0, 9.0, 0.0, CrosshairLineDir::Right),
+                (2.0, 2.0, 0.0, 0.0, CrosshairLineDir::Center),
             ] {
                 c.spawn((
-                    CrosshairLine,
+                    CrosshairLine(dir),
                     Node {
                         position_type: PositionType::Absolute,
                         width: Val::Px(w),
@@ -283,32 +354,68 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
                 ));
             }
-            // Hit marker: four short slashes around the crosshair.
+            // Hit marker: four sharp diagonal slashes around the crosshair + center flash + kill confirmation
             c.spawn((
                 Hitmarker,
                 Node {
                     position_type: PositionType::Absolute,
-                    width: Val::Px(40.0),
-                    height: Val::Px(40.0),
+                    width: Val::Px(56.0),
+                    height: Val::Px(56.0),
                     ..default()
                 },
                 Transform::default(),
                 Visibility::Hidden,
             ))
             .with_children(|h| {
-                for (x, y, a) in [
+                // Center hit flash dot (flashes on body hit / crit)
+                h.spawn((
+                    HitmarkerCenter,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(28.0 - 3.5),
+                        top: Val::Px(28.0 - 3.5),
+                        width: Val::Px(7.0),
+                        height: Val::Px(7.0),
+                        ..default()
+                    },
+                    BorderRadius::all(Val::Px(3.5)),
+                    BackgroundColor(Color::srgba(0.9, 0.1, 0.1, 0.0)),
+                ));
+                // Kill confirmation emblem (shows on lethal kill)
+                h.spawn((
+                    HitmarkerKill,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(28.0 - 7.0),
+                        top: Val::Px(28.0 - 7.0),
+                        width: Val::Px(14.0),
+                        height: Val::Px(14.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+                    BorderColor(Color::srgba(1.0, 0.15, 0.1, 0.0)),
+                    BackgroundColor(Color::srgba(0.85, 0.05, 0.05, 0.0)),
+                    BorderRadius::all(Val::Px(2.0)),
+                    Visibility::Hidden,
+                ));
+                // Four sharp diagonal ticks
+                for (i, (x, y, a)) in [
                     (-1.0, -1.0, 1.0),
                     (1.0, -1.0, -1.0),
                     (-1.0, 1.0, -1.0),
                     (1.0, 1.0, 1.0),
-                ] {
+                ]
+                .iter()
+                .enumerate()
+                {
                     h.spawn((
-                        HitmarkerBar,
+                        HitmarkerBar(i),
                         Node {
                             position_type: PositionType::Absolute,
-                            left: Val::Px(20.0 + x * 10.0 - 1.5),
-                            top: Val::Px(20.0 + y * 10.0 - 6.0),
-                            width: Val::Px(3.0),
+                            left: Val::Px(28.0 + x * 10.0 - 1.5),
+                            top: Val::Px(28.0 + y * 10.0 - 6.0),
+                            width: Val::Px(2.5),
                             height: Val::Px(12.0),
                             ..default()
                         },
@@ -316,6 +423,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                             a * std::f32::consts::FRAC_PI_4,
                         )),
                         BackgroundColor(Color::WHITE),
+                        BorderRadius::all(Val::Px(1.0)),
                     ));
                 }
             });
@@ -334,8 +442,8 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
         ))
         .with_children(|c| {
-            c.spawn((HudText::Round, text("", 44.0, Color::srgb(0.85, 0.12, 0.1))));
-            c.spawn((HudText::Info, text("", 17.0, dim)));
+            c.spawn((HudText::Round, text("", 52.0, Color::srgb(0.85, 0.12, 0.1))));
+            c.spawn((HudText::Info, text("", 20.0, dim)));
         });
 
     // Top centre: the boss's health bar (hidden until a boss is out).
@@ -356,8 +464,8 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Pickable::IGNORE,
         ))
         .with_children(|c| {
-            c.spawn((BossName, text("", 24.0, Color::srgb(1.0, 0.55, 0.4))));
-            bar(c, 520.0, 16.0, Color::srgb(0.85, 0.18, 0.12), BossFill);
+            c.spawn((BossName, text("", 28.0, Color::srgb(1.0, 0.55, 0.4))));
+            bar(c, 560.0, 18.0, Color::srgb(0.85, 0.18, 0.12), BossFill);
         });
 
     // Top centre banner and centre prompt.
@@ -376,7 +484,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .with_children(|c| {
             c.spawn((
                 BannerText,
-                text("", 30.0, ACCENT),
+                text("", 36.0, ACCENT),
                 TextLayout::new_with_justify(JustifyText::Center),
             ));
         });
@@ -395,7 +503,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .with_children(|c| {
             c.spawn((
                 PromptText,
-                text("", 20.0, white),
+                text("", 24.0, white),
                 TextLayout::new_with_justify(JustifyText::Center),
             ));
         });
@@ -414,14 +522,14 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
         ))
         .with_children(|c| {
-            c.spawn((HudText::Perks, text("", 15.0, white)));
-            c.spawn((HudText::Level, text("", 16.0, dim)));
-            bar(c, 240.0, 6.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
-            c.spawn((HudText::Health, text("", 18.0, white)));
+            c.spawn((HudText::Perks, text("", 17.0, white)));
+            c.spawn((HudText::Level, text("", 18.0, dim)));
+            bar(c, 260.0, 7.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
+            c.spawn((HudText::Health, text("", 22.0, white)));
             bar(
                 c,
-                240.0,
-                14.0,
+                260.0,
+                16.0,
                 Color::srgb(0.25, 0.85, 0.35),
                 HudFill::Health,
             );
@@ -447,8 +555,8 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 c.spawn((
                     AbilityBox(i),
                     Node {
-                        width: Val::Px(134.0),
-                        height: Val::Px(46.0),
+                        width: Val::Px(146.0),
+                        height: Val::Px(50.0),
                         border: UiRect::all(Val::Px(2.0)),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
@@ -474,7 +582,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     ));
                     b.spawn((
                         HudText::Ability(i),
-                        text("", 13.0, white),
+                        text("", 15.0, white),
                         TextLayout::new_with_justify(JustifyText::Center),
                     ));
                 });
@@ -496,10 +604,10 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
         ))
         .with_children(|c| {
-            c.spawn((HudText::Points, text("", 30.0, Color::srgb(1.0, 0.85, 0.3))));
-            c.spawn((HudText::OtherGun, text("", 15.0, dim)));
-            c.spawn((HudText::Gun, text("", 18.0, white)));
-            c.spawn((HudText::Ammo, text("", 34.0, white)));
+            c.spawn((HudText::Points, text("", 36.0, Color::srgb(1.0, 0.85, 0.3))));
+            c.spawn((HudText::OtherGun, text("", 18.0, dim)));
+            c.spawn((HudText::Gun, text("", 22.0, white)));
+            c.spawn((HudText::Ammo, text("", 42.0, white)));
         });
 
     // Scoreboard (hold Tab).
@@ -526,7 +634,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 BorderRadius::all(Val::Px(8.0)),
             ))
             .with_children(|p| {
-                p.spawn((ScoreboardText, text("", 17.0, white)));
+                p.spawn((ScoreboardText, text("", 19.0, white)));
             });
         });
 }
@@ -579,11 +687,6 @@ fn update_hud(
     mut texts: Query<(&HudText, &mut Text)>,
     mut fills: Query<(&HudFill, &mut Node, &mut BackgroundColor)>,
     mut ability_box: Query<(&AbilityBox, &mut BorderColor)>,
-    hitmarker: Single<(&mut Visibility, &mut Transform), With<Hitmarker>>,
-    mut hitmarker_bars: Query<
-        &mut BackgroundColor,
-        (With<HitmarkerBar>, Without<HurtFlash>, Without<HudFill>),
-    >,
     mut hurt: Single<&mut BackgroundColor, (With<HurtFlash>, Without<HudFill>)>,
     mut last_health: Local<f32>,
     mut flash: Local<f32>,
@@ -832,8 +935,36 @@ fn update_hud(
         };
     }
 
-    // White on a hit, orange on a headshot, red and bigger on a kill; it
-    // pops out and shrinks back.
+    if me.health < *last_health - 0.5 {
+        *flash = 0.35;
+    }
+    *last_health = me.health;
+    *flash = (*flash - time.delta_secs()).max(0.0);
+    let downed = if me.alive { 0.0 } else { 0.25 };
+    hurt.0 = Color::srgba(0.8, 0.0, 0.0, (*flash).max(downed));
+}
+
+/// CoD Zombies Hitmarker:
+/// 4 sharp diagonal ticks snapping inward/outward with intense visual feedback.
+/// Body hit: crisp white/silver marker with red center flash.
+/// Headshot / Critical hit: bold crimson-amber marker with distinct enlarged ticks.
+/// Lethal kill: distinct red skull/kill confirmation flash.
+fn update_hitmarker(
+    loadout: Res<Loadout>,
+    hitmarker: Single<(&mut Visibility, &mut Transform), (With<Hitmarker>, Without<HitmarkerKill>)>,
+    mut hitmarker_bars: Query<
+        (&HitmarkerBar, &mut BackgroundColor, &mut Node),
+        (Without<HurtFlash>, Without<HudFill>, Without<HitmarkerCenter>, Without<HitmarkerKill>, Without<Hitmarker>),
+    >,
+    mut hitmarker_center: Query<
+        &mut BackgroundColor,
+        (With<HitmarkerCenter>, Without<HitmarkerBar>, Without<HitmarkerKill>, Without<HurtFlash>, Without<HudFill>, Without<Hitmarker>),
+    >,
+    mut hitmarker_kill: Query<
+        (&mut BackgroundColor, &mut BorderColor, &mut Visibility),
+        (With<HitmarkerKill>, Without<Hitmarker>, Without<HitmarkerBar>, Without<HitmarkerCenter>, Without<HurtFlash>, Without<HudFill>),
+    >,
+) {
     let (mut vis, mut tf) = hitmarker.into_inner();
     let kill = loadout.kill_marker > 0.0;
     let showing = loadout.hitmarker > 0.0 || kill;
@@ -842,30 +973,84 @@ fn update_hud(
     } else {
         Visibility::Hidden
     };
+
+    let hit_t = (loadout.hitmarker / 0.14).clamp(0.0, 1.0);
+    let head_t = (loadout.hitmarker / 0.20).clamp(0.0, 1.0);
+    let kill_t = (loadout.kill_marker / 0.35).clamp(0.0, 1.0);
+
     let pop = if kill {
-        1.0 + loadout.kill_marker * 1.6
+        1.0 + kill_t * 1.5
+    } else if loadout.headshot {
+        1.15 + head_t * 2.2
     } else {
-        1.0 + loadout.hitmarker.max(0.0) * 2.5
+        1.0 + hit_t * 1.6
     };
     tf.scale = Vec3::splat(pop);
-    let color = if kill {
-        Color::srgb(1.0, 0.15, 0.1)
+
+    let (color, tick_w, tick_h, base_dist, snap) = if kill {
+        (
+            Color::srgb(1.0, 0.08, 0.08),
+            3.8,
+            16.0,
+            13.0,
+            kill_t.powf(0.5) * 6.0,
+        )
     } else if loadout.headshot {
-        Color::srgb(1.0, 0.6, 0.15)
+        (
+            Color::srgb(1.0, 0.45, 0.12),
+            3.5,
+            16.0,
+            12.0,
+            head_t.powf(0.5) * 5.0,
+        )
     } else {
-        Color::WHITE
+        (
+            Color::srgba(0.95, 0.96, 1.0, 0.95),
+            2.5,
+            12.0,
+            9.5,
+            hit_t.powf(0.5) * 3.5,
+        )
     };
-    for mut bar in &mut hitmarker_bars {
-        bar.0 = color;
+
+    let dist = base_dist + snap;
+    for (HitmarkerBar(i), mut bg, mut node) in &mut hitmarker_bars {
+        bg.0 = color;
+        let (x, y) = match *i {
+            0 => (-1.0, -1.0),
+            1 => (1.0, -1.0),
+            2 => (-1.0, 1.0),
+            _ => (1.0, 1.0),
+        };
+        node.left = Val::Px(28.0 + x * dist - tick_w * 0.5);
+        node.top = Val::Px(28.0 + y * dist - tick_h * 0.5);
+        node.width = Val::Px(tick_w);
+        node.height = Val::Px(tick_h);
     }
 
-    if me.health < *last_health - 0.5 {
-        *flash = 0.35;
+    // Red center hit flash dot
+    for mut bg in &mut hitmarker_center {
+        bg.0 = if kill {
+            Color::srgba(1.0, 0.05, 0.05, kill_t)
+        } else if loadout.headshot {
+            Color::srgba(1.0, 0.38, 0.08, head_t * 0.95)
+        } else if showing {
+            Color::srgba(0.95, 0.10, 0.10, hit_t * 0.9)
+        } else {
+            Color::srgba(0.0, 0.0, 0.0, 0.0)
+        };
     }
-    *last_health = me.health;
-    *flash = (*flash - time.delta_secs()).max(0.0);
-    let downed = if me.alive { 0.0 } else { 0.25 };
-    hurt.0 = Color::srgba(0.8, 0.0, 0.0, (*flash).max(downed));
+
+    // Lethal kill confirmation emblem
+    for (mut bg, mut border, mut k_vis) in &mut hitmarker_kill {
+        *k_vis = if kill {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        bg.0 = Color::srgba(0.85, 0.04, 0.04, kill_t * 0.55);
+        border.0 = Color::srgba(1.0, 0.15, 0.1, kill_t * 0.95);
+    }
 }
 
 fn update_prompt(
@@ -1168,7 +1353,7 @@ fn upgrade_panel(
             .with_children(|p| {
                 p.spawn(text(
                     format!("LEVEL {} - PICK AN UPGRADE", me.level),
-                    28.0,
+                    34.0,
                     ACCENT,
                 ));
                 let left = if me.pending_picks > 1 {
@@ -1176,17 +1361,19 @@ fn upgrade_panel(
                 } else {
                     "Every 5 levels you get a pick. Levels also add damage.".into()
                 };
-                p.spawn(text(left, 16.0, Color::srgb(0.7, 0.75, 0.85)));
+                p.spawn(text(left, 18.0, Color::srgb(0.7, 0.75, 0.85)));
                 for (i, c) in choices.iter().enumerate() {
-                    button(
+                    button_sized(
                         p,
                         c.label(me),
                         UiAction::ChooseUpgrade(i as u8),
+                        Some(460.0),
+                        false,
                     );
                 }
                 p.spawn(text(
                     "Esc or B to close (you can pick later)",
-                    14.0,
+                    15.0,
                     Color::srgb(0.6, 0.6, 0.7),
                 ));
             });
@@ -1248,20 +1435,20 @@ fn end_screen(
                     align_items: AlignItems::Center,
                     row_gap: Val::Px(10.0),
                     padding: UiRect::all(Val::Px(28.0)),
-                    min_width: Val::Px(460.0),
+                    min_width: Val::Px(500.0),
                     ..default()
                 },
                 BackgroundColor(PANEL),
                 BorderRadius::all(Val::Px(10.0)),
             ))
             .with_children(|p| {
-                p.spawn(text(title, 54.0, color));
+                p.spawn(text(title, 60.0, color));
                 if !how_far.is_empty() {
-                    p.spawn(text(how_far.clone(), 20.0, Color::srgb(0.85, 0.85, 0.95)));
+                    p.spawn(text(how_far.clone(), 22.0, Color::srgb(0.85, 0.85, 0.95)));
                 }
                 p.spawn(text(
                     format!("Rounds survived: {}", result.round),
-                    22.0,
+                    24.0,
                     Color::WHITE,
                 ));
                 if let Some(me) = me {
@@ -1270,27 +1457,27 @@ fn end_screen(
                             "Kills {}   Score {}   Level {}",
                             me.kills, me.score, me.level
                         ),
-                        18.0,
+                        20.0,
                         Color::srgb(0.8, 0.82, 0.9),
                     ));
                 }
                 if result.new_best {
-                    p.spawn(text("New personal best!", 18.0, ACCENT));
+                    p.spawn(text("New personal best!", 20.0, ACCENT));
                 }
                 let spins = if result.spins > 0 {
                     format!("+{} gacha spins", result.spins)
                 } else {
                     "No spins this time - reach round 5 to earn spins".into()
                 };
-                p.spawn(text(spins, 22.0, Color::srgb(1.0, 0.8, 0.3)));
+                p.spawn(text(spins, 24.0, Color::srgb(1.0, 0.8, 0.3)));
                 if result.premium_quarters > 0 {
                     p.spawn(text(
                         format!("+{} premium spin", crate::config::quarters_text(result.premium_quarters)),
-                        20.0,
+                        22.0,
                         Color::srgb(1.0, 0.55, 0.9),
                     ));
                 }
-                p.spawn(text(format!("+{} career XP", result.xp), 20.0, Color::srgb(0.55, 0.85, 1.0)));
+                p.spawn(text(format!("+{} career XP", result.xp), 22.0, Color::srgb(0.55, 0.85, 1.0)));
                 let (before, after) = result.levels;
                 if after > before {
                     let unlocked: Vec<String> = (before + 1..=after)
@@ -1302,7 +1489,7 @@ fn end_screen(
                         .collect();
                     p.spawn(text(
                         format!("Career level {after}! Unlocked for your loadout: {}", unlocked.join(", ")),
-                        18.0,
+                        20.0,
                         ACCENT,
                     ));
                 }
@@ -1324,7 +1511,7 @@ fn end_screen(
                             new.join(", ")
                         )
                     };
-                    p.spawn(text(msg, 18.0, ACCENT));
+                    p.spawn(text(msg, 20.0, ACCENT));
                 }
                 p.spawn(text(
                     format!(
@@ -1332,15 +1519,15 @@ fn end_screen(
                         profile.spins,
                         crate::config::quarters_text(profile.premium_quarters)
                     ),
-                    15.0,
+                    16.0,
                     Color::srgb(0.7, 0.72, 0.8),
                 ));
                 if session.is_authority() {
-                    button(p, "Play again", UiAction::BackToLobby);
+                    button_sized(p, "Play again", UiAction::BackToLobby, Some(380.0), false);
                 } else {
-                    p.spawn(text("Waiting for the host to start again...", 16.0, Color::srgb(0.7, 0.75, 0.85)));
+                    p.spawn(text("Waiting for the host to start again...", 18.0, Color::srgb(0.7, 0.75, 0.85)));
                 }
-                button(p, "Quit to main menu", UiAction::Leave);
+                button_sized(p, "Quit to main menu", UiAction::Leave, Some(380.0), false);
             });
         });
 }

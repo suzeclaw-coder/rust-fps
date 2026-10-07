@@ -22,12 +22,14 @@ use crate::net::{LocalReady, Notice, PartyRequest, DEFAULT_PORT, MAX_NAME_LEN};
 use crate::sim::new_match;
 use crate::{ActionQueue, AppState, MatchState, PlayerAction, Role, Roster, Session};
 
-pub const PANEL: Color = Color::srgba(0.06, 0.07, 0.11, 0.92);
+pub const PANEL: Color = Color::srgba(0.06, 0.07, 0.11, 0.94);
 pub const ACCENT: Color = Color::srgb(1.0, 0.78, 0.25);
-const BUTTON: Color = Color::srgb(0.16, 0.18, 0.26);
-const BUTTON_HOVER: Color = Color::srgb(0.24, 0.27, 0.38);
-const BUTTON_PRESS: Color = Color::srgb(0.34, 0.38, 0.52);
-const DIM: Color = Color::srgb(0.68, 0.72, 0.8);
+const BUTTON: Color = Color::srgb(0.14, 0.16, 0.24);
+const BUTTON_HOVER: Color = Color::srgb(0.24, 0.28, 0.40);
+const BUTTON_PRESS: Color = Color::srgb(0.34, 0.40, 0.58);
+const BUTTON_SELECTED: Color = Color::srgb(0.20, 0.24, 0.36);
+const BUTTON_BORDER: Color = Color::srgba(0.36, 0.40, 0.56, 0.45);
+const DIM: Color = Color::srgb(0.72, 0.76, 0.84);
 const WARN: Color = Color::srgb(1.0, 0.55, 0.35);
 const PREMIUM: Color = Color::srgb(1.0, 0.55, 0.9);
 
@@ -180,6 +182,7 @@ pub enum UiAction {
 enum Slider {
     Fov,
     Sensitivity,
+    UiScale,
     Volume,
     Guns,
     Enemies,
@@ -193,6 +196,7 @@ impl Slider {
         match self {
             Slider::Fov => (60.0, 120.0),
             Slider::Sensitivity => (0.1, 3.0),
+            Slider::UiScale => (0.8, 1.5),
             _ => (0.0, 100.0),
         }
     }
@@ -201,6 +205,7 @@ impl Slider {
         match self {
             Slider::Fov => s.fov,
             Slider::Sensitivity => s.sensitivity,
+            Slider::UiScale => if s.ui_scale > 0.0 { s.ui_scale } else { 1.0 },
             Slider::Volume => s.volume,
             Slider::Guns => s.vol_guns,
             Slider::Enemies => s.vol_enemies,
@@ -214,6 +219,7 @@ impl Slider {
         match self {
             Slider::Fov => s.fov = v.round(),
             Slider::Sensitivity => s.sensitivity = (v * 20.0).round() / 20.0,
+            Slider::UiScale => s.ui_scale = (v * 20.0).round() / 20.0,
             Slider::Volume => s.volume = v.round(),
             Slider::Guns => s.vol_guns = v.round(),
             Slider::Enemies => s.vol_enemies = v.round(),
@@ -227,6 +233,7 @@ impl Slider {
         match self {
             Slider::Fov => format!("Field of view: {:.0}", s.fov),
             Slider::Sensitivity => format!("Mouse sensitivity: {:.2}", s.sensitivity),
+            Slider::UiScale => format!("UI text scale: {:.2}x", if s.ui_scale > 0.0 { s.ui_scale } else { 1.0 }),
             Slider::Volume => format!("Master volume: {:.0}%", s.volume),
             Slider::Guns => format!("Guns and hits: {:.0}%", s.vol_guns),
             Slider::Enemies => format!("Zombies: {:.0}%", s.vol_enemies),
@@ -274,32 +281,38 @@ fn label(p: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32, colo
 }
 
 /// A clickable button that does `action`.
+#[allow(dead_code)]
 pub fn button(p: &mut ChildSpawnerCommands, value: impl Into<String>, action: UiAction) {
     button_sized(p, value, action, None, false);
 }
 
-fn button_sized(
+pub fn button_sized(
     p: &mut ChildSpawnerCommands,
     value: impl Into<String>,
     action: UiAction,
     width: Option<f32>,
     selected: bool,
 ) {
+    let font_size = match width {
+        Some(w) if w < 90.0 => 16.0,
+        Some(w) if w < 150.0 => 16.0,
+        _ => 20.0,
+    };
     let mut e = p.spawn((
         Button,
         action,
         Node {
             width: width.map_or(Val::Auto, Val::Px),
-            min_width: Val::Px(if width.is_some() { 0.0 } else { 260.0 }),
-            padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+            min_width: Val::Px(if width.is_some() { 0.0 } else { 280.0 }),
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(10.0)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BackgroundColor(BUTTON),
-        BorderColor(if selected { ACCENT } else { Color::NONE }),
-        BorderRadius::all(Val::Px(6.0)),
+        BackgroundColor(if selected { BUTTON_SELECTED } else { BUTTON }),
+        BorderColor(if selected { ACCENT } else { BUTTON_BORDER }),
+        BorderRadius::all(Val::Px(7.0)),
     ));
     if selected {
         e.insert(Selected);
@@ -308,7 +321,7 @@ fn button_sized(
         b.spawn((
             Text::new(value),
             TextFont {
-                font_size: 18.0,
+                font_size,
                 ..default()
             },
             TextColor(Color::WHITE),
@@ -323,7 +336,7 @@ fn row(p: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawnerCommands)) 
         align_items: AlignItems::Center,
         column_gap: Val::Px(8.0),
         flex_wrap: FlexWrap::Wrap,
-        row_gap: Val::Px(6.0),
+        row_gap: Val::Px(8.0),
         ..default()
     })
     .with_children(f);
@@ -332,7 +345,7 @@ fn row(p: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawnerCommands)) 
 fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(4.0),
+        row_gap: Val::Px(5.0),
         ..default()
     })
     .with_children(|c| {
@@ -340,7 +353,7 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
             SliderLabel(kind),
             Text::new(kind.label(settings)),
             TextFont {
-                font_size: 16.0,
+                font_size: 18.0,
                 ..default()
             },
             TextColor(Color::WHITE),
@@ -350,12 +363,14 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
             kind,
             RelativeCursorPosition::default(),
             Node {
-                width: Val::Px(380.0),
-                height: Val::Px(16.0),
+                width: Val::Px(420.0),
+                height: Val::Px(18.0),
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
             BackgroundColor(BUTTON),
-            BorderRadius::all(Val::Px(8.0)),
+            BorderColor(BUTTON_BORDER),
+            BorderRadius::all(Val::Px(9.0)),
         ))
         .with_children(|t| {
             t.spawn((
@@ -375,25 +390,24 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
 
 /// A full-height panel down the left side (menus) or a centred box (in game).
 fn panel(commands: &mut Commands, centered: bool, f: impl FnOnce(&mut ChildSpawnerCommands)) {
-    let outer = if centered {
-        Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        }
-    } else {
-        Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        }
+    let outer = Node {
+        position_type: PositionType::Absolute,
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        justify_content: if centered {
+            JustifyContent::Center
+        } else {
+            JustifyContent::FlexStart
+        },
+        align_items: if centered {
+            AlignItems::Center
+        } else {
+            AlignItems::FlexStart
+        },
+        ..default()
     };
     let bg = if centered {
-        Color::srgba(0.0, 0.0, 0.0, 0.5)
+        Color::srgba(0.0, 0.0, 0.0, 0.55)
     } else {
         Color::NONE
     };
@@ -403,18 +417,21 @@ fn panel(commands: &mut Commands, centered: bool, f: impl FnOnce(&mut ChildSpawn
             o.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(9.0),
+                    row_gap: Val::Px(10.0),
                     padding: UiRect::all(Val::Px(28.0)),
-                    min_width: Val::Px(480.0),
+                    min_width: Val::Px(if centered { 520.0 } else { 750.0 }),
+                    max_width: if centered { Val::Px(800.0) } else { Val::Auto },
                     height: if centered {
                         Val::Auto
                     } else {
                         Val::Percent(100.0)
                     },
+                    border: UiRect::top(Val::Px(if centered { 3.0 } else { 0.0 })),
                     overflow: Overflow::clip(),
                     ..default()
                 },
                 BackgroundColor(PANEL),
+                BorderColor(if centered { ACCENT } else { Color::NONE }),
                 BorderRadius::all(Val::Px(if centered { 10.0 } else { 0.0 })),
             ))
             .with_children(f);
@@ -422,8 +439,26 @@ fn panel(commands: &mut Commands, centered: bool, f: impl FnOnce(&mut ChildSpawn
 }
 
 fn title(p: &mut ChildSpawnerCommands, sub: &str) {
-    label(p, "RUST FPS", 52.0, Color::srgb(0.9, 0.2, 0.15));
-    label(p, sub, 20.0, ACCENT);
+    label(p, "RUST FPS", 56.0, Color::srgb(0.95, 0.22, 0.16));
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        margin: UiRect::bottom(Val::Px(4.0)),
+        ..default()
+    })
+    .with_children(|r| {
+        r.spawn((
+            Node {
+                width: Val::Px(6.0),
+                height: Val::Px(6.0),
+                ..default()
+            },
+            BackgroundColor(ACCENT),
+            BorderRadius::all(Val::Px(3.0)),
+        ));
+        label(r, sub, 22.0, ACCENT);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +497,8 @@ fn rebuild_ui(
                 settings.ambient_occlusion,
                 settings.outlines,
                 settings.camera_shake,
-                settings.particles
+                settings.particles,
+                settings.ui_scale.to_bits(),
             ),
             *spin,
             (profile.character, profile.kit(profile.character), profile.char_level(profile.character)),
@@ -525,7 +561,8 @@ fn rebuild_ui(
                 settings.ambient_occlusion,
                 settings.outlines,
                 settings.camera_shake,
-                settings.particles
+                settings.particles,
+                settings.ui_scale.to_bits(),
             ),
             settings.display.name(),
             settings.resolution,
@@ -568,13 +605,13 @@ fn rebuild_ui(
             Overlay::Pause => {
                 let solo = session.role == Role::Solo;
                 panel(&mut commands, true, |p| {
-                    label(p, if solo { "PAUSED" } else { "MENU" }, 40.0, ACCENT);
+                    label(p, if solo { "PAUSED" } else { "MENU" }, 46.0, ACCENT);
                     if !solo {
-                        label(p, "The match keeps going while this is open!", 15.0, WARN);
+                        label(p, "The match keeps going while this is open!", 17.0, WARN);
                     }
-                    button(p, "Resume", UiAction::Resume);
-                    button(p, "Settings", UiAction::PauseSettings);
-                    button(
+                    button_sized(p, "Resume", UiAction::Resume, Some(360.0), false);
+                    button_sized(p, "Settings", UiAction::PauseSettings, Some(360.0), false);
+                    button_sized(
                         p,
                         if session.role == Role::Host {
                             "End party and quit to menu"
@@ -582,6 +619,8 @@ fn rebuild_ui(
                             "Quit to main menu"
                         },
                         UiAction::Leave,
+                        Some(360.0),
+                        false,
                     );
                 });
             }
@@ -612,8 +651,8 @@ fn text_field(
         Button,
         action,
         Node {
-            width: Val::Px(340.0),
-            padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+            width: Val::Px(344.0),
+            padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
@@ -621,15 +660,15 @@ fn text_field(
         BorderColor(if focused {
             ACCENT
         } else {
-            Color::srgb(0.3, 0.32, 0.4)
+            BUTTON_BORDER
         }),
-        BorderRadius::all(Val::Px(6.0)),
+        BorderRadius::all(Val::Px(7.0)),
     ))
     .with_children(|b| {
         b.spawn((
             Text::new(shown),
             TextFont {
-                font_size: 18.0,
+                font_size: 20.0,
                 ..default()
             },
             TextColor(if value.is_empty() && !focused {
@@ -648,7 +687,7 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
             height: Val::Px(8.0),
             ..default()
         });
-        label(p, "Your name (click to change)", 15.0, DIM);
+        label(p, "Your name (click to change)", 16.0, DIM);
         text_field(
             p,
             &profile.name,
@@ -660,11 +699,11 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
             height: Val::Px(6.0),
             ..default()
         });
-        button(p, "Play Solo", UiAction::PlaySolo);
-        button(p, "Host a Party", UiAction::Host);
-        button(p, "Join a Party", UiAction::OpenJoin);
+        button_sized(p, "Play Solo", UiAction::PlaySolo, Some(696.0), false);
+        button_sized(p, "Host a Party", UiAction::Host, Some(696.0), false);
+        button_sized(p, "Join a Party", UiAction::OpenJoin, Some(696.0), false);
         let brought = profile.class_loadout(profile.character);
-        button(
+        button_sized(
             p,
             format!(
                 "Loadout  ({} + {})",
@@ -672,13 +711,17 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
                 gun_def(brought[1].0).name
             ),
             UiAction::OpenLoadout,
+            Some(696.0),
+            false,
         );
-        button(
+        button_sized(
             p,
             format!("Characters  ({})", profile.character.name()),
             UiAction::OpenCharacters,
+            Some(696.0),
+            false,
         );
-        button(
+        button_sized(
             p,
             format!(
                 "Gun Crates  ({} spin{})",
@@ -686,8 +729,10 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
                 if profile.spins == 1 { "" } else { "s" }
             ),
             UiAction::OpenSkins,
+            Some(696.0),
+            false,
         );
-        button(p, "Gun Skins", UiAction::OpenGunSkins);
+        button_sized(p, "Gun Skins", UiAction::OpenGunSkins, Some(696.0), false);
         row(p, |r| {
             button_sized(
                 r,
@@ -713,11 +758,11 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
                 "Career level {level} ({into}/{need} XP)    Best round: {}    Runs won: {}    Version {}",
                 profile.best_round, profile.extractions, crate::VERSION
             ),
-            15.0,
+            16.0,
             DIM,
         );
         if !notice.0.is_empty() {
-            label(p, notice.0.clone(), 16.0, WARN);
+            label(p, notice.0.clone(), 18.0, WARN);
         }
     });
 }
@@ -725,7 +770,7 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
 fn join_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focus: Focus) {
     panel(commands, false, |p| {
         title(p, "Join a party");
-        label(p, "Host's address", 15.0, DIM);
+        label(p, "Host's address", 16.0, DIM);
         text_field(
             p,
             &profile.last_address,
@@ -738,13 +783,13 @@ fn join_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
             format!(
                 "The host's party screen shows the address to type.\nSame Wi-Fi works out of the box. Over the internet the host\nneeds to forward UDP port {DEFAULT_PORT} (or use a VPN like Tailscale)."
             ),
-            15.0,
+            16.0,
             DIM,
         );
-        button(p, "Connect", UiAction::Connect);
-        button(p, "Back", UiAction::BackToMain);
+        button_sized(p, "Connect", UiAction::Connect, Some(344.0), false);
+        button_sized(p, "Back", UiAction::BackToMain, Some(344.0), false);
         if !notice.0.is_empty() {
-            label(p, notice.0.clone(), 16.0, WARN);
+            label(p, notice.0.clone(), 18.0, WARN);
         }
     });
 }
@@ -759,7 +804,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                     r,
                     format!("{}\nLv {level}", c.name()),
                     UiAction::SelectCharacter(c),
-                    Some(150.0),
+                    Some(160.0),
                     profile.character == c,
                 );
             }
@@ -771,8 +816,8 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
         p.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
-                padding: UiRect::all(Val::Px(14.0)),
+                row_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
@@ -782,23 +827,23 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
         ))
         .with_children(|card| {
             row(card, |r| {
-                label(r, c.name(), 30.0, c.suit_color().lighter(0.2));
-                label(r, c.tagline(), 16.0, DIM);
+                label(r, c.name(), 34.0, c.suit_color().lighter(0.2));
+                label(r, c.tagline(), 18.0, DIM);
             });
             let xp = if level >= MAX_CHAR_LEVEL {
                 format!("Level {level} (max)")
             } else {
                 format!("Level {level}   {into} / {need} XP to level {}", level + 1)
             };
-            label(card, xp, 16.0, Color::srgb(0.55, 0.85, 1.0));
+            label(card, xp, 18.0, Color::srgb(0.55, 0.85, 1.0));
             bar(card, if level >= MAX_CHAR_LEVEL { 1.0 } else { into as f32 / need as f32 });
             // Pick an ability for each key. Locked ones show their level.
             row(card, |cols| {
                 for slot in 0..3usize {
                     cols.spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(5.0),
-                        width: Val::Px(250.0),
+                        row_gap: Val::Px(6.0),
+                        width: Val::Px(268.0),
                         ..default()
                     })
                     .with_children(|col| {
@@ -806,7 +851,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                         label(
                             col,
                             format!("{head} [{}]", key_name(settings.key(keys[slot]))),
-                            16.0,
+                            18.0,
                             ACCENT,
                         );
                         for a in c.pool().into_iter().filter(|a| a.is_ult() == (slot == 2)) {
@@ -816,7 +861,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                                     col,
                                     format!("{}  (Lv {unlock})", a.name()),
                                     UiAction::Locked,
-                                    Some(250.0),
+                                    Some(268.0),
                                     false,
                                 );
                             } else {
@@ -824,7 +869,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                                     col,
                                     a.name(),
                                     UiAction::PickAbility(slot as u8, a),
-                                    Some(250.0),
+                                    Some(268.0),
                                     kit[slot] == a,
                                 );
                             }
@@ -836,7 +881,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                 label(
                     card,
                     format!("[{}] {}: {}", key_name(settings.key(keys[slot])), a.name(), a.def().desc),
-                    15.0,
+                    16.0,
                     Color::WHITE,
                 );
             }
@@ -844,10 +889,10 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
         label(
             p,
             "Play matches as a character to level them up and unlock new abilities. Abilities also get stronger as you level up in a match.",
-            15.0,
+            16.0,
             DIM,
         );
-        button(p, "Back", UiAction::BackToMain);
+        button_sized(p, "Back", UiAction::BackToMain, Some(280.0), false);
     });
 }
 
@@ -855,12 +900,12 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
 fn bar(p: &mut ChildSpawnerCommands, frac: f32) {
     p.spawn((
         Node {
-            width: Val::Px(400.0),
-            height: Val::Px(8.0),
+            width: Val::Px(440.0),
+            height: Val::Px(10.0),
             ..default()
         },
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
-        BorderRadius::all(Val::Px(4.0)),
+        BorderRadius::all(Val::Px(5.0)),
     ))
     .with_child((
         Node {
@@ -869,14 +914,14 @@ fn bar(p: &mut ChildSpawnerCommands, frac: f32) {
             ..default()
         },
         BackgroundColor(Color::srgb(0.55, 0.85, 1.0)),
-        BorderRadius::all(Val::Px(4.0)),
+        BorderRadius::all(Val::Px(5.0)),
     ));
 }
 
 fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
     let c = &CRATES[shop.crate_id];
     panel(commands, false, |p| {
-        label(p, "GUN CRATES", 34.0, ACCENT);
+        label(p, "GUN CRATES", 38.0, ACCENT);
         label(
             p,
             format!(
@@ -885,7 +930,7 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                 quarters_text(profile.premium_quarters),
                 profile.shards
             ),
-            18.0,
+            20.0,
             Color::WHITE,
         );
         row(p, |r| {
@@ -893,7 +938,7 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                 r,
                 format!("Trade {PREMIUM_TRADE_COST} spins for 1 premium spin"),
                 UiAction::TradePremium,
-                Some(330.0),
+                Some(380.0),
                 false,
             );
             label(
@@ -902,7 +947,7 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                     "Also: +1/4 premium spin every\n{ROUNDS_PER_PREMIUM_QUARTER} rounds survived ({}/{ROUNDS_PER_PREMIUM_QUARTER})",
                     profile.round_bank
                 ),
-                13.0,
+                14.0,
                 DIM,
             );
         });
@@ -913,10 +958,10 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                     Button,
                     UiAction::SelectCrate(i as u8),
                     Node {
-                        width: Val::Px(104.0),
+                        width: Val::Px(120.0),
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
-                        padding: UiRect::axes(Val::Px(4.0), Val::Px(5.0)),
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(7.0)),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
@@ -926,12 +971,12 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                     } else if cr.premium {
                         PREMIUM.with_alpha(0.6)
                     } else {
-                        Color::NONE
+                        BUTTON_BORDER
                     }),
-                    BorderRadius::all(Val::Px(6.0)),
+                    BorderRadius::all(Val::Px(7.0)),
                 ))
                 .with_children(|b| {
-                    label(b, cr.name, 14.0, Color::WHITE);
+                    label(b, cr.name, 15.0, Color::WHITE);
                     let owned = cr
                         .skins
                         .iter()
@@ -941,7 +986,7 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                     label(
                         b,
                         format!("{tag}  {owned}/{}", cr.skins.len()),
-                        11.0,
+                        12.0,
                         if cr.premium { PREMIUM } else { DIM },
                     );
                 });
@@ -950,14 +995,14 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
         label(
             p,
             c.blurb,
-            14.0,
+            16.0,
             if c.premium { PREMIUM } else { Color::WHITE },
         );
         let odds: Vec<String> = crate_odds(shop.crate_id)
             .into_iter()
             .map(|(r, pct)| format!("{} {:.0}%", r.name(), pct))
             .collect();
-        label(p, format!("Odds: {}", odds.join(", ")), 13.0, DIM);
+        label(p, format!("Odds: {}", odds.join(", ")), 15.0, DIM);
         let all = c.skins.iter().all(|s| profile.owned_skins.contains(s));
         let (cost, have) = if c.premium {
             ("1 premium spin", profile.premium_quarters >= 4)
@@ -965,21 +1010,21 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
             ("1 spin", profile.spins > 0)
         };
         if all {
-            label(p, "You own everything in this crate!", 16.0, ACCENT);
+            label(p, "You own everything in this crate!", 18.0, ACCENT);
         } else if have {
-            button(p, format!("Open {} ({cost})", c.name), UiAction::OpenCrate);
+            button_sized(p, format!("Open {} ({cost})", c.name), UiAction::OpenCrate, Some(380.0), false);
         } else if c.premium {
             label(
                 p,
                 "No premium spins - trade spins for one or keep surviving rounds.",
-                15.0,
+                16.0,
                 WARN,
             );
         } else {
             label(
                 p,
                 "No spins left - earn more by surviving rounds.",
-                15.0,
+                16.0,
                 WARN,
             );
         }
@@ -995,17 +1040,17 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
             label(
                 p,
                 format!("You got: {} ({}) {what}", s.name, s.rarity.name()),
-                18.0,
+                20.0,
                 s.rarity.color(),
             );
         } else if let Some(msg) = &shop.message {
-            label(p, msg.clone(), 15.0, WARN);
+            label(p, msg.clone(), 16.0, WARN);
         }
         p.spawn(Node {
             display: Display::Grid,
             grid_template_columns: RepeatedGridTrack::flex(3, 1.0),
-            column_gap: Val::Px(6.0),
-            row_gap: Val::Px(6.0),
+            column_gap: Val::Px(8.0),
+            row_gap: Val::Px(8.0),
             ..default()
         })
         .with_children(|g| {
@@ -1019,10 +1064,10 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
         label(
             p,
             "Click a skin you own to see it on the right. Put skins on your guns in\nGun Skins on the main menu. Round 5 = 1 spin, round 10 = 3,\nround 15 = 6, round 20 = 10.",
-            12.0,
+            14.0,
             DIM,
         );
-        button(p, "Back", UiAction::BackToMain);
+        button_sized(p, "Back", UiAction::BackToMain, Some(280.0), false);
     });
 }
 
@@ -1042,7 +1087,7 @@ fn skin_tile(
         Node {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
-            padding: UiRect::all(Val::Px(4.0)),
+            padding: UiRect::all(Val::Px(5.0)),
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
@@ -1050,9 +1095,9 @@ fn skin_tile(
         BorderColor(if selected {
             ACCENT
         } else {
-            s.rarity.color().with_alpha(0.4)
+            s.rarity.color().with_alpha(0.5)
         }),
-        BorderRadius::all(Val::Px(6.0)),
+        BorderRadius::all(Val::Px(7.0)),
     ))
     .with_children(|b| {
         // A two-tone swatch for patterned skins.
@@ -1071,8 +1116,8 @@ fn skin_tile(
             for part in parts {
                 sw.spawn((
                     Node {
-                        width: Val::Px(28.0),
-                        height: Val::Px(12.0),
+                        width: Val::Px(32.0),
+                        height: Val::Px(14.0),
                         ..default()
                     },
                     BackgroundColor(if owned { rgb(part) } else { locked }),
@@ -1080,11 +1125,11 @@ fn skin_tile(
             }
         });
         let name = if owned { s.name } else { "???" };
-        label(b, name, 13.0, if owned { Color::WHITE } else { DIM });
+        label(b, name, 14.0, if owned { Color::WHITE } else { DIM });
         label(
             b,
             format!("{} - {under}", s.rarity.name()),
-            10.0,
+            12.0,
             s.rarity.color(),
         );
     });
@@ -1098,18 +1143,18 @@ pub const ALL_GUNS: u8 = 254;
 fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
     let gun = shop.gun;
     panel(commands, false, |p| {
-        label(p, "GUN SKINS", 34.0, ACCENT);
+        label(p, "GUN SKINS", 38.0, ACCENT);
         label(
             p,
             "Pick a gun, then click a skin to put it on. It shows in game, for you and your party.",
-            14.0,
+            16.0,
             DIM,
         );
         p.spawn(Node {
             display: Display::Grid,
             grid_template_columns: RepeatedGridTrack::flex(5, 1.0),
-            column_gap: Val::Px(4.0),
-            row_gap: Val::Px(4.0),
+            column_gap: Val::Px(5.0),
+            row_gap: Val::Px(5.0),
             ..default()
         })
         .with_children(|g| {
@@ -1127,17 +1172,17 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
                     Node {
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
-                        padding: UiRect::axes(Val::Px(3.0), Val::Px(3.0)),
+                        padding: UiRect::axes(Val::Px(4.0), Val::Px(4.0)),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if id == gun { ACCENT } else { Color::NONE }),
-                    BorderRadius::all(Val::Px(5.0)),
+                    BorderColor(if id == gun { ACCENT } else { BUTTON_BORDER }),
+                    BorderRadius::all(Val::Px(6.0)),
                 ))
                 .with_children(|b| {
-                    label(b, name, 12.0, Color::WHITE);
-                    label(b, s.name, 10.0, s.rarity.color());
+                    label(b, name, 13.0, Color::WHITE);
+                    label(b, s.name, 11.0, s.rarity.color());
                 });
             }
         });
@@ -1146,7 +1191,7 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
         } else {
             (format!("Skins for the {}", gun_def(gun).name), profile.skin_for(gun))
         };
-        label(p, title, 18.0, ACCENT);
+        label(p, title, 20.0, ACCENT);
         // Skins that fit: the default finish takes skins for every gun; a
         // gun also takes its own.
         let fits: Vec<u8> = (0..crate::data::SKINS.len() as u8)
@@ -1163,8 +1208,8 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
         p.spawn(Node {
             display: Display::Grid,
             grid_template_columns: RepeatedGridTrack::flex(5, 1.0),
-            column_gap: Val::Px(5.0),
-            row_gap: Val::Px(5.0),
+            column_gap: Val::Px(6.0),
+            row_gap: Val::Px(6.0),
             ..default()
         })
         .with_children(|g| {
@@ -1176,17 +1221,17 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
-                        padding: UiRect::all(Val::Px(4.0)),
+                        padding: UiRect::all(Val::Px(5.0)),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if own { Color::NONE } else { ACCENT }),
-                    BorderRadius::all(Val::Px(6.0)),
+                    BorderColor(if own { BUTTON_BORDER } else { ACCENT }),
+                    BorderRadius::all(Val::Px(7.0)),
                 ))
                 .with_children(|b| {
-                    label(b, "Default", 13.0, Color::WHITE);
-                    label(b, skin_def(profile.skin).name, 10.0, DIM);
+                    label(b, "Default", 14.0, Color::WHITE);
+                    label(b, skin_def(profile.skin).name, 11.0, DIM);
                 });
             }
             for id in fits {
@@ -1196,9 +1241,9 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
             }
         });
         if !profile.owned_skins.iter().any(|&id| id != 0) {
-            label(p, "Open Gun Crates to win more skins.", 14.0, WARN);
+            label(p, "Open Gun Crates to win more skins.", 15.0, WARN);
         }
-        button(p, "Back", UiAction::BackToMain);
+        button_sized(p, "Back", UiAction::BackToMain, Some(280.0), false);
     });
 }
 
@@ -1208,7 +1253,7 @@ fn settings_body(
     rebinding: Option<Action>,
     tab: u8,
 ) {
-    label(p, "SETTINGS", 34.0, ACCENT);
+    label(p, "SETTINGS", 38.0, ACCENT);
     row(p, |r| {
         for (i, name) in ["General", "Audio", "Graphics", "Controls"]
             .iter()
@@ -1218,7 +1263,7 @@ fn settings_body(
                 r,
                 *name,
                 UiAction::SettingsTab(i as u8),
-                Some(120.0),
+                Some(140.0),
                 tab == i as u8,
             );
         }
@@ -1280,9 +1325,9 @@ fn settings_body(
                 ),
             ] {
                 row(p, |r| {
-                    label(r, format!("{name}:"), 16.0, Color::WHITE);
-                    button_sized(r, value, action, Some(100.0), false);
-                    label(r, help, 13.0, DIM);
+                    label(r, format!("{name}:"), 18.0, Color::WHITE);
+                    button_sized(r, value, action, Some(110.0), false);
+                    label(r, help, 15.0, DIM);
                 });
             }
         }
@@ -1290,25 +1335,25 @@ fn settings_body(
             label(
                 p,
                 "Controls (click one, then press the new key):",
-                16.0,
+                18.0,
                 Color::WHITE,
             );
             p.spawn(Node {
                 display: Display::Grid,
                 grid_template_columns: vec![
-                    GridTrack::px(150.0),
-                    GridTrack::px(100.0),
-                    GridTrack::px(150.0),
-                    GridTrack::px(100.0),
+                    GridTrack::px(180.0),
+                    GridTrack::px(110.0),
+                    GridTrack::px(180.0),
+                    GridTrack::px(110.0),
                 ],
-                column_gap: Val::Px(6.0),
-                row_gap: Val::Px(4.0),
+                column_gap: Val::Px(8.0),
+                row_gap: Val::Px(5.0),
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|g| {
                 for a in Action::ALL {
-                    label(g, a.label(), 14.0, DIM);
+                    label(g, a.label(), 16.0, DIM);
                     let text = if rebinding == Some(a) {
                         "press a key".to_string()
                     } else {
@@ -1318,7 +1363,7 @@ fn settings_body(
                         Button,
                         UiAction::Rebind(a),
                         Node {
-                            padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                             justify_content: JustifyContent::Center,
                             border: UiRect::all(Val::Px(1.0)),
                             ..default()
@@ -1327,61 +1372,62 @@ fn settings_body(
                         BorderColor(if rebinding == Some(a) {
                             ACCENT
                         } else {
-                            Color::NONE
+                            BUTTON_BORDER
                         }),
-                        BorderRadius::all(Val::Px(4.0)),
+                        BorderRadius::all(Val::Px(5.0)),
                     ))
-                    .with_children(|b| label(b, text, 14.0, Color::WHITE));
+                    .with_children(|b| label(b, text, 16.0, Color::WHITE));
                 }
             });
             label(
                 p,
                 "Fixed: mouse to shoot, right mouse to aim, 1 / 2 or scroll to switch guns, Esc for menu.",
-                13.0,
+                15.0,
                 DIM,
             );
             row(p, |r| {
-                label(r, "Casting:", 16.0, Color::WHITE);
+                label(r, "Casting:", 18.0, Color::WHITE);
                 for (i, name) in ["Ability 1", "Ability 2", "Ultimate"].iter().enumerate() {
                     let text = format!("{name}: {}", settings.cast_modes[i].name());
-                    button_sized(r, &text, UiAction::CycleCast(i as u8), Some(170.0), false);
+                    button_sized(r, &text, UiAction::CycleCast(i as u8), Some(190.0), false);
                 }
             });
             label(
                 p,
                 "Instant: casts on press. Quick: hold to aim, release to cast. Confirm: press to aim, click to cast, right-click to cancel.",
-                13.0,
+                15.0,
                 DIM,
             );
-            button_sized(p, "Reset controls", UiAction::ResetKeys, Some(210.0), false);
+            button_sized(p, "Reset controls", UiAction::ResetKeys, Some(240.0), false);
         }
         _ => {
             slider(p, Slider::Fov, settings);
             slider(p, Slider::Sensitivity, settings);
+            slider(p, Slider::UiScale, settings);
             row(p, |r| {
-                label(r, "Display:", 16.0, Color::WHITE);
+                label(r, "Display:", 18.0, Color::WHITE);
                 button_sized(
                     r,
                     settings.display.name(),
                     UiAction::CycleDisplay,
-                    Some(150.0),
+                    Some(160.0),
                     false,
                 );
-                label(r, "Resolution:", 16.0, Color::WHITE);
-                button_sized(r, "<", UiAction::CycleResolution(-1), Some(36.0), false);
+                label(r, "Resolution:", 18.0, Color::WHITE);
+                button_sized(r, "<", UiAction::CycleResolution(-1), Some(40.0), false);
                 let (w, h) = RESOLUTIONS[settings.resolution.min(RESOLUTIONS.len() - 1)];
-                label(r, format!("{w}x{h}"), 16.0, Color::WHITE);
-                button_sized(r, ">", UiAction::CycleResolution(1), Some(36.0), false);
+                label(r, format!("{w}x{h}"), 18.0, Color::WHITE);
+                button_sized(r, ">", UiAction::CycleResolution(1), Some(40.0), false);
             });
             label(
                 p,
                 "Resolution applies in Windowed mode; Borderless and Fullscreen use your screen's.",
-                13.0,
+                15.0,
                 DIM,
             );
         }
     }
-    button_sized(p, "Back", UiAction::SettingsBack, Some(120.0), false);
+    button_sized(p, "Back", UiAction::SettingsBack, Some(140.0), false);
 }
 
 fn lobby_screen(
@@ -1403,11 +1449,11 @@ fn lobby_screen(
         };
         title(p, heading);
         if !session.status.is_empty() {
-            label(p, session.status.clone(), 16.0, Color::srgb(0.5, 0.9, 1.0));
+            label(p, session.status.clone(), 18.0, Color::srgb(0.5, 0.9, 1.0));
         }
         if session.role == Role::Host {
             row(p, |r| {
-                label(r, "Over the internet:", 16.0, Color::WHITE);
+                label(r, "Over the internet:", 18.0, Color::WHITE);
                 let text = if !public_ip.visible {
                     "Click to reveal".to_string()
                 } else if let Some(a) = public_ip.address() {
@@ -1417,7 +1463,7 @@ fn lobby_screen(
                 } else {
                     "Couldn't look it up - click to retry".to_string()
                 };
-                button_sized(r, text, UiAction::RevealIp, Some(300.0), public_ip.visible);
+                button_sized(r, text, UiAction::RevealIp, Some(320.0), public_ip.visible);
             });
             if public_ip.visible {
                 label(
@@ -1426,19 +1472,19 @@ fn lobby_screen(
                         "Keep this private. Friends outside your Wi-Fi need you to forward\nUDP port {} on your router (or use a VPN like Tailscale).",
                         public_ip.port
                     ),
-                    13.0,
+                    15.0,
                     DIM,
                 );
             }
         }
         if session.role == Role::Client && !session.connected {
-            label(p, "Waiting for the host to answer...", 16.0, DIM);
+            label(p, "Waiting for the host to answer...", 18.0, DIM);
         }
         if session.role != Role::Solo {
             label(
                 p,
                 format!("Players ({}):", roster.0.len()),
-                17.0,
+                18.0,
                 Color::WHITE,
             );
             for pl in roster.0.values() {
@@ -1456,7 +1502,7 @@ fn lobby_screen(
                         pl.name,
                         pl.character.name()
                     ),
-                    16.0,
+                    18.0,
                     if pl.ready || pl.id == 0 {
                         Color::srgb(0.5, 1.0, 0.6)
                     } else {
@@ -1465,14 +1511,14 @@ fn lobby_screen(
                 );
             }
         }
-        label(p, "Character:", 17.0, Color::WHITE);
+        label(p, "Character:", 18.0, Color::WHITE);
         row(p, |r| {
             for c in Character::ALL {
                 button_sized(
                     r,
                     c.name(),
                     UiAction::SelectCharacter(c),
-                    Some(104.0),
+                    Some(114.0),
                     profile.character == c,
                 );
             }
@@ -1487,7 +1533,7 @@ fn lobby_screen(
                 ab[1].name(),
                 ab[2].name()
             ),
-            14.0,
+            16.0,
             DIM,
         );
         label(
@@ -1499,7 +1545,7 @@ fn lobby_screen(
                     .filter(|&g| profile.skin_for(g) != profile.skin)
                     .count()
             ),
-            14.0,
+            15.0,
             DIM,
         );
         label(
@@ -1509,43 +1555,43 @@ fn lobby_screen(
                 crate::data::STAGES,
                 crate::data::ROUNDS_PER_STAGE
             ),
-            15.0,
+            16.0,
             DIM,
         );
         if authority {
             row(p, |r| {
-                button_sized(r, "<", UiAction::CycleMap(-1), Some(40.0), false);
-                label(r, map_name(state.map), 20.0, ACCENT);
-                button_sized(r, ">", UiAction::CycleMap(1), Some(40.0), false);
+                button_sized(r, "<", UiAction::CycleMap(-1), Some(44.0), false);
+                label(r, map_name(state.map), 22.0, ACCENT);
+                button_sized(r, ">", UiAction::CycleMap(1), Some(44.0), false);
             });
         } else {
             label(
                 p,
                 format!("{} (the host picks)", map_name(state.map)),
-                18.0,
+                20.0,
                 ACCENT,
             );
         }
         let time = if state.night { "Night" } else { "Day" };
         if authority {
             row(p, |r| {
-                label(r, "Time:", 17.0, Color::WHITE);
-                button_sized(r, time, UiAction::ToggleNight, Some(110.0), state.night);
+                label(r, "Time:", 18.0, Color::WHITE);
+                button_sized(r, time, UiAction::ToggleNight, Some(120.0), state.night);
             });
         } else {
-            label(p, format!("Time: {time}"), 17.0, Color::WHITE);
+            label(p, format!("Time: {time}"), 18.0, Color::WHITE);
         }
         let blurb = match state.map {
             0 => "Container stacks, cranes and narrow lanes.",
             1 => "Open lawns, trees, a pond and a bandstand.",
             _ => "Houses, fences and a cul-de-sac.",
         };
-        label(p, blurb, 14.0, DIM);
+        label(p, blurb, 15.0, DIM);
         if state.sandbox.on {
             label(
                 p,
                 "No waves until you start them. Press F1 in the match for the sandbox tools.",
-                15.0,
+                16.0,
                 ACCENT,
             );
         }
@@ -1562,7 +1608,7 @@ fn lobby_screen(
                     format!(
                         "{ready_n} of {others} friends ready. Friends can also join mid-match."
                     ),
-                    15.0,
+                    16.0,
                     DIM,
                 );
             }
@@ -1586,7 +1632,7 @@ fn lobby_screen(
             button_sized(r, leave, UiAction::Leave, Some(344.0), false);
         });
         if !authority && session.connected {
-            label(p, "The host starts the match.", 15.0, DIM);
+            label(p, "The host starts the match.", 16.0, DIM);
         }
     });
 }
@@ -2052,15 +2098,15 @@ fn update_sliders(
 
 fn button_colors(
     mut buttons: Query<
-        (&Interaction, &mut BackgroundColor),
+        (&Interaction, &mut BackgroundColor, Has<Selected>),
         (With<UiAction>, Changed<Interaction>),
     >,
 ) {
-    for (interaction, mut bg) in &mut buttons {
+    for (interaction, mut bg, selected) in &mut buttons {
         bg.0 = match interaction {
             Interaction::Pressed => BUTTON_PRESS,
             Interaction::Hovered => BUTTON_HOVER,
-            Interaction::None => BUTTON,
+            Interaction::None => if selected { BUTTON_SELECTED } else { BUTTON },
         };
     }
 }

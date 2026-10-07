@@ -78,6 +78,12 @@ fn shake_sources(
                 shake.add(0.7 * size * near(pos, radius * 3.0 + 8.0));
             }
             Fx::Slam { pos, radius } => shake.add(0.8 * near(pos, radius * 3.0 + 8.0)),
+            Fx::Blood { pos, headshot: true, .. } => {
+                shake.add(0.08 * near(pos, 8.0));
+            }
+            Fx::Decapitation { pos } => {
+                shake.add(0.14 * near(pos, 10.0));
+            }
             _ => {}
         }
     }
@@ -277,19 +283,23 @@ fn warm_up(
             pos: at,
             radius: 4.0,
         },
-        Fx::Nova {
-            pos: at,
-            radius: 4.0,
-        },
         Fx::Slash {
             pos: at,
             dir,
             radius: 3.0,
         },
-        Fx::Cone {
+        Fx::Blood {
             pos: at,
             dir,
-            range: 6.0,
+            headshot: false,
+        },
+        Fx::Blood {
+            pos: at,
+            dir,
+            headshot: true,
+        },
+        Fx::Decapitation {
+            pos: at,
         },
     ]);
     for ability in crate::data::Ability::ALL {

@@ -3,6 +3,7 @@
 //! folder: %APPDATA%\RustFPS on Windows, ~/.config/rust-fps elsewhere.
 
 use bevy::prelude::*;
+use bevy::ui::UiScale;
 use bevy::window::{MonitorSelection, PrimaryWindow, VideoModeSelection, WindowMode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -218,6 +219,8 @@ pub struct Settings {
     pub vol_interface: f32,
     pub display: DisplayMode,
     pub resolution: usize,
+    /// UI and text scaling factor (default 1.0; 0.8 to 1.5).
+    pub ui_scale: f32,
     /// Graphics: shadow quality (0 off, 1 normal, 2 high), smoothed edges,
     /// glow on bright things, and soft shading in corners.
     pub shadows: u8,
@@ -248,6 +251,7 @@ impl Default for Settings {
             vol_interface: 100.0,
             display: DisplayMode::Windowed,
             resolution: 0,
+            ui_scale: 1.0,
             shadows: 2,
             antialias: true,
             bloom: true,
@@ -478,13 +482,19 @@ fn save_on_change(settings: Res<Settings>, profile: Res<Profile>) {
     }
 }
 
-/// Applies window mode and resolution whenever they change.
+/// Applies window mode, resolution, and UI scale whenever they change.
 fn apply_display(
     settings: Res<Settings>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
-    mut last: Local<Option<(DisplayMode, usize)>>,
+    mut ui_scale: ResMut<UiScale>,
+    mut last: Local<Option<(DisplayMode, usize, u32)>>,
 ) {
-    let current = (settings.display, settings.resolution);
+    let scale = if settings.ui_scale >= 0.5 && settings.ui_scale <= 2.5 {
+        settings.ui_scale
+    } else {
+        1.0
+    };
+    let current = (settings.display, settings.resolution, scale.to_bits());
     if *last == Some(current) {
         return;
     }
@@ -499,5 +509,20 @@ fn apply_display(
     };
     if settings.display == DisplayMode::Windowed {
         window.resolution.set(w as f32, h as f32);
+    }
+    ui_scale.0 = scale;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_serde_backwards_compatible() {
+        let old_json = r#"{"fov":85.0,"sensitivity":1.2}"#;
+        let s: Settings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(s.fov, 85.0);
+        assert_eq!(s.sensitivity, 1.2);
+        assert_eq!(s.ui_scale, 1.0);
     }
 }

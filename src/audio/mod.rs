@@ -95,6 +95,7 @@ pub enum Snd {
     PlayerHurt,
     Explosion,
     BigExplosion,
+    Slam,
     Fire,
     Ice,
     Heal,
@@ -143,7 +144,7 @@ impl Snd {
             Groan | BruteRoar | ShooterHiss | CrawlerRasp | ZombieAttack | ZombieHurt
             | ZombieDeath | Spit => Group::Enemies,
             Step | StepSoft | Jump | Land | Slide | PlayerHurt => Group::Movement,
-            Explosion | BigExplosion | Fire | Ice | Heal | Zap | Slash | Whoosh | Orbital
+            Explosion | BigExplosion | Slam | Fire | Ice | Heal | Zap | Slash | Whoosh | Orbital
             | BladeStorm | Throw | Chain | Twang | Snap | Shatter | Hiss | Wail | Warcry => {
                 Group::Effects
             }
@@ -158,7 +159,7 @@ impl Snd {
             ShotSniper | ShotShotgun | ShotMagnum | ShotThunder => (0.9, 30.0),
             ShotPistol | ShotSmg | ShotRifle | ShotLmg | ShotRay => (0.75, 25.0),
             ShotSuppressed | ShotTurret => (0.5, 10.0),
-            Explosion | Orbital => (1.0, 40.0),
+            Explosion | Slam | Orbital => (1.0, 40.0),
             BigExplosion => (1.0, 60.0),
             Groan | ShooterHiss | CrawlerRasp => (0.35, 8.0),
             BruteRoar => (0.6, 18.0),
@@ -166,7 +167,8 @@ impl Snd {
             Step | StepSoft => (0.35, 6.0),
             Door => (0.8, 20.0),
             BoxJingle | BoxReady | BoxFly => (0.6, 14.0),
-            HitTick | HitHead | Kill => (0.55, 100.0),
+            HitHead => (0.7, 100.0),
+            HitTick | Kill => (0.55, 100.0),
             UiClick | CrateTick => (0.4, 100.0),
             _ => (0.65, 15.0),
         }
@@ -247,29 +249,17 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     };
     for i in 0..3 {
         let seed = 100 + i * 17;
-        add(ShotPistol, gunshot(&shot(190.0, 0.05, 5000.0, 0.25), seed));
-        add(
-            ShotMagnum,
-            gunshot(&shot(120.0, 0.09, 3500.0, 0.4), seed + 1),
-        );
-        add(ShotSmg, gunshot(&shot(230.0, 0.04, 6000.0, 0.2), seed + 2));
-        add(
-            ShotRifle,
-            gunshot(&shot(140.0, 0.07, 4500.0, 0.35), seed + 3),
-        );
-        add(
-            ShotShotgun,
-            gunshot(&shot(75.0, 0.14, 2600.0, 0.45), seed + 4),
-        );
-        add(ShotLmg, gunshot(&shot(110.0, 0.08, 3800.0, 0.35), seed + 5));
-        add(
-            ShotSniper,
-            gunshot(&shot(90.0, 0.16, 3000.0, 0.55), seed + 6),
-        );
+        add(ShotPistol, pistol_shot(seed));
+        add(ShotMagnum, magnum_shot(seed + 1));
+        add(ShotSmg, smg_shot(seed + 2));
+        add(ShotRifle, rifle_shot(seed + 3));
+        add(ShotShotgun, shotgun_shot(seed + 4));
+        add(ShotLmg, lmg_shot(seed + 5));
+        add(ShotSniper, sniper_shot(seed + 6));
         add(ShotSuppressed, suppressed(160.0, seed + 7));
         add(
             ShotTurret,
-            gunshot(&shot(300.0, 0.03, 7000.0, 0.1), seed + 8),
+            gunshot(&shot(260.0, 0.035, 6500.0, 0.15), seed + 8),
         );
         add(ShotRay, laser(seed + 9));
         add(ShotThunder, thunder(seed + 10));
@@ -304,27 +294,11 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
             .normalize(0.7),
     );
     add(Slide, whoosh(0.6, 500.0, 1800.0, 15));
-    add(
-        HitTick,
-        bell(&[(2600.0, 1.0, 0.025), (3900.0, 0.4, 0.015)], 0.08),
-    );
-    add(
-        HitHead,
-        bell(
-            &[
-                (1760.0, 1.0, 0.18),
-                (2640.0, 0.6, 0.12),
-                (4400.0, 0.3, 0.06),
-            ],
-            0.4,
-        ),
-    );
-    add(
-        Kill,
-        thud(140.0, 0.15, 16)
-            .mix(&bell(&[(1200.0, 0.7, 0.05)], 0.1), 0.0, 0.6)
-            .normalize(0.6),
-    );
+    for i in 0..3 {
+        add(HitTick, hitmarker_tick(140 + i));
+        add(HitHead, skull_pop(150 + i));
+        add(Kill, kill_sound(160 + i));
+    }
 
     // Zombie voices: pitch, formants and rasp vary per variant.
     for i in 0..6u32 {
@@ -395,21 +369,20 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         );
     }
     for i in 0..3u32 {
-        add(
-            ZombieHurt,
-            voice(
-                &Voice {
-                    pitch: 110.0 + i as f32 * 15.0,
-                    pitch_end: 80.0,
-                    formants: (700.0, 1200.0),
-                    formants_end: (500.0, 900.0),
-                    rasp: 0.4,
-                    len: 0.28,
-                    attack: 0.1,
-                },
-                450 + i,
-            ),
+        let v = voice(
+            &Voice {
+                pitch: 110.0 + i as f32 * 15.0,
+                pitch_end: 80.0,
+                formants: (700.0, 1200.0),
+                formants_end: (500.0, 900.0),
+                rasp: 0.4,
+                len: 0.28,
+                attack: 0.1,
+            },
+            450 + i,
         );
+        let impact = flesh_impact(455 + i);
+        add(ZombieHurt, v.mix(&impact, 0.0, 0.9).normalize(0.85));
         add(
             ZombieDeath,
             voice(
@@ -477,6 +450,8 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     add(Explosion, explosion(500, 1.0));
     add(Explosion, explosion(501, 1.0));
     add(BigExplosion, explosion(502, 1.8));
+    add(Slam, boss_slam(505));
+    add(Slam, slam(506));
     add(Fire, fire(510, 1.0));
     add(Ice, ice(520));
     add(Heal, chime_up(523.0, &[1.0, 1.26, 1.5, 2.0, 2.52], 0.07));
@@ -758,18 +733,10 @@ fn fx_sounds(
                 },
                 Vec3::from_array(pos),
             ),
-            Fx::Lightning { b, .. } => sounds.at(Snd::Zap, Vec3::from_array(b)),
-            Fx::Spear { a, b } => {
-                sounds.at(Snd::Throw, Vec3::from_array(a));
-                sounds.at(Snd::Zap, Vec3::from_array(b));
-            }
-            Fx::Slam { pos, .. } => sounds.at(Snd::ShotThunder, Vec3::from_array(pos)),
-            Fx::Beam { pos, .. } => sounds.at(Snd::Orbital, Vec3::from_array(pos)),
+            Fx::Slam { pos, .. } => sounds.at(Snd::Slam, Vec3::from_array(pos)),
             Fx::Heal { pos, .. } => sounds.at(Snd::Heal, Vec3::from_array(pos)),
-            Fx::Nova { pos, .. } => sounds.at(Snd::Ice, Vec3::from_array(pos)),
             Fx::Dash { a, .. } => sounds.at(Snd::Whoosh, Vec3::from_array(a)),
             Fx::Slash { pos, .. } => sounds.at(Snd::Slash, Vec3::from_array(pos)),
-            Fx::Cone { pos, .. } => sounds.at(Snd::Fire, Vec3::from_array(pos)),
             Fx::Zone { pos, kind, .. } => {
                 use crate::sim::powers::zone;
                 let (snd, gain, pitch) = match kind {
@@ -792,11 +759,11 @@ fn fx_sounds(
                 let first = size == 0.0;
                 let (snd, gain, pitch) = match ability {
                     A::ShieldCharge => (Snd::MeleeHit, 1.0, 0.6),
-                    A::GroundPound => (Snd::ShotThunder, 1.0, 0.75),
+                    A::GroundPound => (Snd::Slam, 1.0, 0.75),
                     A::Fortress => (Snd::PowerUp, 1.0, 0.8),
                     A::RallyCry => (Snd::Warcry, 1.0, 1.0),
                     A::Earthshaker if first => (Snd::BigExplosion, 1.0, 0.7),
-                    A::Earthshaker => (Snd::ShotThunder, 0.7, 0.6),
+                    A::Earthshaker => (Snd::Slam, 0.7, 0.6),
                     A::HealingGrenade => (Snd::Heal, 1.0, 1.0),
                     A::NeurotoxinDart => (Snd::Hiss, 0.4, 1.5),
                     A::Resurrection if first => (Snd::Heal, 1.0, 0.75),
@@ -842,6 +809,15 @@ fn fx_sounds(
                 sounds.push(Snd::Whoosh, Some(Vec3::from_array(to)), gain, pitch);
             }
             Fx::Ring { pos, .. } => sounds.push(Snd::Whoosh, Some(Vec3::from_array(pos)), 0.5, 1.2),
+            Fx::Blood { pos, headshot, .. } => {
+                if headshot {
+                    sounds.push(Snd::ZombieHurt, Some(Vec3::from_array(pos)), 0.6, 1.4);
+                }
+            }
+            Fx::Decapitation { pos } => {
+                sounds.push(Snd::ZombieDeath, Some(Vec3::from_array(pos)), 0.85, 1.3);
+            }
+            _ => {}
         }
     }
 }
@@ -853,9 +829,10 @@ fn gun_sounds(
     roster: Res<Roster>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut sounds: ResMut<SoundQueue>,
-    mut last: Local<(u32, f32, usize, u32, bool, bool)>,
+    mut last: Local<(u32, f32, usize, u32, bool, bool, bool)>,
 ) {
-    let (last_shots, last_reload, last_slot, last_kills, was_hit, swinging) = &mut *last;
+    let (last_shots, last_reload, last_slot, last_kills, was_hit, swinging, was_headshot) =
+        &mut *last;
     if let Some(g) = loadout.current() {
         if loadout.shots != *last_shots {
             sounds.here(shot_sound(g.id, g.attach.handling(g.id).quiet));
@@ -893,7 +870,9 @@ fn gun_sounds(
     }
     *swinging = loadout.melee.is_some();
     let hit = loadout.hitmarker > 0.0;
-    if hit && (!*was_hit || loadout.shots != *last_shots) {
+    let new_hit = hit && (!*was_hit || loadout.shots != *last_shots);
+    let new_headshot = hit && loadout.headshot && !*was_headshot;
+    if new_hit || new_headshot {
         sounds.here(if loadout.melee.is_some() {
             Snd::MeleeHit
         } else if loadout.headshot {
@@ -911,6 +890,7 @@ fn gun_sounds(
     *last_slot = loadout.active;
     *last_kills = kills;
     *was_hit = hit;
+    *was_headshot = hit && loadout.headshot;
 }
 
 /// Footsteps, jumps, landings and slides, for you and your teammates.

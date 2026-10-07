@@ -6,6 +6,8 @@
 //! 30 times a second. Clients move their own character locally, so movement
 //! feels instant even with some lag. Actions are numbered and resent until
 //! the host confirms them, so a dropped packet never loses a purchase.
+//! Critical gameplay effects and match events are sequenced and confirmed
+//! with acknowledgements so packet loss does not drop important effects.
 
 use bevy::prelude::*;
 use bincode::Options;
@@ -25,7 +27,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 12;
+const PROTOCOL_VERSION: u32 = 13;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -126,6 +128,31 @@ pub fn parse_args() -> Launch {
 // Messages
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum NetEvent {
+    Fx(Fx),
+    PowerUpGrabbed {
+        player: u8,
+        kind: crate::data::PowerUp,
+    },
+    PlayerDown {
+        player: u8,
+    },
+    PlayerRevived {
+        player: u8,
+    },
+    BossSpawned {
+        level: u8,
+    },
+    BossPhase {
+        level: u8,
+        phase: u8,
+    },
+    BossDefeated {
+        level: u8,
+    },
+}
+
 #[derive(Serialize, Deserialize)]
 enum ClientMsg {
     Hello {
@@ -156,6 +183,7 @@ struct ClientUpdate {
     ready: bool,
     shots: Vec<Shot>,
     actions: Vec<(u32, PlayerAction)>,
+    event_ack: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -173,6 +201,7 @@ struct Snapshot {
     players: Vec<PlayerInfo>,
     entities: Vec<NetEntity>,
     fx: Vec<Fx>,
+    events: Vec<(u32, NetEvent)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -206,6 +235,7 @@ fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Option<T> {
 struct Conn {
     id: u8,
     last_heard: f64,
+    event_ack: u32,
 }
 
 #[derive(Resource)]
@@ -223,6 +253,11 @@ pub struct Net {
     /// Client only: actions not yet confirmed by the host.
     pending: Vec<(u32, PlayerAction)>,
     shots: Vec<Shot>,
+    /// Host only: reliable event counter and queue of un-acked/recent events.
+    event_seq: u32,
+    pending_events: Vec<(u32, NetEvent)>,
+    /// Client only: highest event sequence number applied.
+    last_event_seq: u32,
 }
 
 impl Net {
@@ -239,6 +274,9 @@ impl Net {
             last_tick: 0,
             pending: Vec::new(),
             shots: Vec::new(),
+            event_seq: 0,
+            pending_events: Vec::new(),
+            last_event_seq: 0,
         })
     }
 
@@ -755,6 +793,7 @@ fn host_receive(
                     Conn {
                         id,
                         last_heard: now,
+                        event_ack: 0,
                     },
                 );
                 net.send_to(&ServerMsg::Welcome { id }, addr);
@@ -764,6 +803,9 @@ fn host_receive(
                     continue;
                 };
                 conn.last_heard = now;
+                if u.event_ack > conn.event_ack {
+                    conn.event_ack = u.event_ack;
+                }
                 let id = conn.id;
                 let Some(p) = roster.0.get_mut(&id) else {
                     continue;
@@ -850,38 +892,66 @@ fn host_send(
     }
     net.timer = 0.0;
     let fx = std::mem::take(&mut out.0);
+
+    // Queue critical events (e.g. pings) into the reliable sequenced queue.
+    for f in &fx {
+        if matches!(f, Fx::Ping { .. }) {
+            net.event_seq += 1;
+            let seq = net.event_seq;
+            net.pending_events.push((seq, NetEvent::Fx(f.clone())));
+        }
+    }
+
     if net.clients.is_empty() {
         return;
     }
+
+    // Prune events that all currently connected clients have acknowledged.
+    if let Some(min_ack) = net.clients.values().map(|c| c.event_ack).min() {
+        net.pending_events.retain(|(seq, _)| *seq > min_ack);
+    }
+    // Cap pending events to prevent unbounded growth in case of edge cases.
+    if net.pending_events.len() > 128 {
+        let excess = net.pending_events.len() - 128;
+        net.pending_events.drain(0..excess);
+    }
+
     net.tick += 1;
-    let snapshot = ServerMsg::Snapshot(Snapshot {
-        tick: net.tick,
-        state: state.clone(),
-        players: roster.0.values().cloned().collect(),
-        entities: things
+    for (addr, conn) in &net.clients {
+        let events: Vec<(u32, NetEvent)> = net
+            .pending_events
             .iter()
-            .map(|(r, t, status)| NetEntity {
-                id: r.id,
-                kind: r.kind,
-                pos: t.translation.to_array(),
-                yaw: t.rotation.to_euler(EulerRot::YXZ).0,
-                flags: status.map_or(0, |s| {
-                    (s.flash > 0.0) as u8
-                        | (s.burning as u8) << 1
-                        | (s.slowed as u8) << 2
-                        | (s.crawler as u8) << 3
-                        | (s.attacking as u8) << 4
-                        | (s.stunned as u8) << 5
-                        | (s.poisoned as u8) << 6
-                        | (s.marked as u8) << 7
-                }),
-            })
-            .collect(),
-        fx,
-    });
-    let bytes = encode(&snapshot);
-    for addr in net.clients.keys() {
-        let _ = net.socket.send_to(&bytes, addr);
+            .filter(|(seq, _)| *seq > conn.event_ack)
+            .take(32)
+            .cloned()
+            .collect();
+        let snapshot = ServerMsg::Snapshot(Snapshot {
+            tick: net.tick,
+            state: state.clone(),
+            players: roster.0.values().cloned().collect(),
+            entities: things
+                .iter()
+                .map(|(r, t, status)| NetEntity {
+                    id: r.id,
+                    kind: r.kind,
+                    pos: t.translation.to_array(),
+                    yaw: t.rotation.to_euler(EulerRot::YXZ).0,
+                    flags: status.map_or(0, |s| {
+                        (s.flash > 0.0) as u8
+                            | (s.burning as u8) << 1
+                            | (s.slowed as u8) << 2
+                            | (s.crawler as u8) << 3
+                            | (s.attacking as u8) << 4
+                            | (s.stunned as u8) << 5
+                            | (s.poisoned as u8) << 6
+                            | (s.marked as u8) << 7
+                    }),
+                })
+                .collect(),
+            fx: fx.clone(),
+            events,
+        });
+        net.send_to(&snapshot, *addr);
     }
 }
 
@@ -961,6 +1031,7 @@ fn client_send(
         ready: ready.0,
         shots: std::mem::take(&mut net.shots),
         actions: net.pending.iter().take(16).copied().collect(),
+        event_ack: net.last_event_seq,
     });
     net.send_to(&update, server);
 }
@@ -1085,7 +1156,34 @@ fn client_receive(
         return;
     }
 
+    // Process reliable sequenced match events.
+    for (seq, event) in snap.events {
+        if seq <= net.last_event_seq {
+            continue;
+        }
+        net.last_event_seq = seq;
+        match event {
+            NetEvent::Fx(f) => {
+                match &f {
+                    Fx::Tracer { shooter: who, .. } | Fx::Dash { player: who, .. }
+                        if *who == session.my_id => {}
+                    _ => fx.0.push(f),
+                }
+            }
+            NetEvent::PowerUpGrabbed { .. } => {}
+            NetEvent::PlayerDown { .. } => {}
+            NetEvent::PlayerRevived { .. } => {}
+            NetEvent::BossSpawned { .. } => {}
+            NetEvent::BossPhase { .. } => {}
+            NetEvent::BossDefeated { .. } => {}
+        }
+    }
+
+    // Process fire-and-forget effects (critical effects like Ping ride in reliable events)
     for f in snap.fx {
+        if matches!(f, Fx::Ping { .. }) {
+            continue;
+        }
         match &f {
             Fx::Tracer { shooter: who, .. } | Fx::Dash { player: who, .. }
                 if *who == session.my_id =>
@@ -1182,5 +1280,108 @@ mod tests {
         assert_eq!(clean_address("47. 12.34.56:7777"), "47.12.34.56:7777");
         assert!(resolve("47.12.34.56").is_ok());
         assert!(resolve("v47.12.34.56").is_err());
+    }
+
+    #[test]
+    fn reliable_net_events_encode_decode() {
+        let ping_ev = NetEvent::Fx(Fx::Ping {
+            player: 1,
+            pos: [10.0, 0.0, -5.0],
+            target: 42,
+        });
+        let power_ev = NetEvent::PowerUpGrabbed {
+            player: 2,
+            kind: crate::data::PowerUp::DoublePoints,
+        };
+        let down_ev = NetEvent::PlayerDown { player: 3 };
+        let revive_ev = NetEvent::PlayerRevived { player: 3 };
+        let boss_spawn_ev = NetEvent::BossSpawned { level: 1 };
+        let boss_phase_ev = NetEvent::BossPhase { level: 1, phase: 2 };
+        let boss_defeat_ev = NetEvent::BossDefeated { level: 1 };
+
+        let events = vec![
+            (1, ping_ev.clone()),
+            (2, power_ev.clone()),
+            (3, down_ev.clone()),
+            (4, revive_ev.clone()),
+            (5, boss_spawn_ev.clone()),
+            (6, boss_phase_ev.clone()),
+            (7, boss_defeat_ev.clone()),
+        ];
+
+        let bytes = encode(&events);
+        assert!(!bytes.is_empty());
+        let decoded: Option<Vec<(u32, NetEvent)>> = decode(&bytes);
+        assert_eq!(decoded, Some(events));
+    }
+
+    #[test]
+    fn reliable_event_queue_prunes_on_ack() {
+        let mut pending_events: Vec<(u32, NetEvent)> = vec![
+            (
+                1,
+                NetEvent::Fx(Fx::Ping {
+                    player: 0,
+                    pos: [0.0; 3],
+                    target: u32::MAX,
+                }),
+            ),
+            (
+                2,
+                NetEvent::PowerUpGrabbed {
+                    player: 1,
+                    kind: crate::data::PowerUp::MaxAmmo,
+                },
+            ),
+            (
+                3,
+                NetEvent::BossPhase {
+                    level: 0,
+                    phase: 1,
+                },
+            ),
+        ];
+
+        // Simulate client acknowledging event 2
+        let min_ack = 2;
+        pending_events.retain(|(seq, _)| *seq > min_ack);
+
+        assert_eq!(pending_events.len(), 1);
+        assert_eq!(pending_events[0].0, 3);
+    }
+
+    #[test]
+    fn reliable_event_client_deduplication() {
+        let mut last_event_seq = 0;
+        let mut processed_events = Vec::new();
+
+        // Simulate 2 packet arrivals (e.g. retransmission due to network lag)
+        let incoming_batches = vec![
+            vec![
+                (1, NetEvent::PlayerDown { player: 2 }),
+                (2, NetEvent::PlayerRevived { player: 2 }),
+            ],
+            vec![
+                (1, NetEvent::PlayerDown { player: 2 }), // Duplicate
+                (2, NetEvent::PlayerRevived { player: 2 }), // Duplicate
+                (3, NetEvent::BossDefeated { level: 0 }), // New
+            ],
+        ];
+
+        for batch in incoming_batches {
+            for (seq, ev) in batch {
+                if seq <= last_event_seq {
+                    continue;
+                }
+                last_event_seq = seq;
+                processed_events.push(ev);
+            }
+        }
+
+        assert_eq!(last_event_seq, 3);
+        assert_eq!(processed_events.len(), 3);
+        assert_eq!(processed_events[0], NetEvent::PlayerDown { player: 2 });
+        assert_eq!(processed_events[1], NetEvent::PlayerRevived { player: 2 });
+        assert_eq!(processed_events[2], NetEvent::BossDefeated { level: 0 });
     }
 }

@@ -83,6 +83,7 @@ fn sync_rigs(
         rig.swing_rate = crate::sim::BRUTE_WINDUP / crate::sim::slam_spec(r.kind).0;
         if status.attacking && rig.swing > 0.6 {
             rig.swing = 0.0;
+            rig.attack_variant = (rig.attack_variant + 1) % 3;
         }
         if status.flash > 0.0 {
             rig.flinch = 1.0;

@@ -116,7 +116,7 @@ pub struct Loadout {
     /// Muzzle climb from recoil still to be recovered, and how long the
     /// trigger has been held (auto guns drift sideways the longer you hold).
     climb: f32,
-    spray: u32,
+    pub spray: u32,
     /// Melee: seconds into the swing (None when not swinging), the cooldown,
     /// and whether this swing has landed yet.
     pub melee: Option<f32>,
@@ -464,18 +464,25 @@ pub fn fire(
     loadout.fire_cd -= dt;
     loadout.grenade_cd = (loadout.grenade_cd - dt).max(0.0);
     loadout.hitmarker -= dt;
-    loadout.recoil = (loadout.recoil - dt * 8.0).max(0.0);
+    // Exponential smooth decay for visual gun kick
+    loadout.recoil *= (-9.5 * dt).exp();
+    if loadout.recoil < 0.001 {
+        loadout.recoil = 0.0;
+    }
     loadout.flash -= dt;
-    // Once the trigger is let go the muzzle settles most of the way back.
+    // Once the trigger is let go the muzzle smoothly recovers back down.
     let (cam_tf, p) = &mut *player;
     let cam_tf = **cam_tf;
     let holding = mouse.pressed(MouseButton::Left) && loadout.fire_cd > -0.08;
     if !holding {
         loadout.spray = 0;
         if loadout.climb > 0.0 {
-            let back = (loadout.climb * (1.0 - (-9.0 * dt).exp())).min(loadout.climb);
+            // Smooth critical-damped recovery curve so camera recoil doesn't snap abruptly
+            let recovery_rate = 10.0;
+            let step = loadout.climb * (1.0 - (-recovery_rate * dt).exp());
+            let back = step.min(loadout.climb);
             loadout.climb -= back;
-            p.pitch -= back * 0.75;
+            p.pitch -= back * 0.85;
         }
     }
 
@@ -676,7 +683,7 @@ pub fn fire(
         ));
     }
     if any_hit {
-        loadout.hitmarker = 0.12;
+        loadout.hitmarker = if head { 0.20 } else { 0.14 };
         loadout.headshot = head;
     }
 }

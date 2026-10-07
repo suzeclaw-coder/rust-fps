@@ -3,6 +3,8 @@
 //! Start the game and use the menus, or skip straight to a party from the
 //! command line with `host` or `join <address>`. See README.md.
 
+#![recursion_limit = "256"]
+
 /// The game's version, from Cargo.toml (major.minor, e.g. "v4.0").
 pub const VERSION: &str = concat!(
     "v",

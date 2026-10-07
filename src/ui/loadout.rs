@@ -15,12 +15,12 @@ use super::{button_sized, label, panel, row, UiAction, ACCENT, DIM};
 fn xp_bar(p: &mut ChildSpawnerCommands, into: u32, need: u32) {
     p.spawn((
         Node {
-            width: Val::Px(420.0),
-            height: Val::Px(10.0),
+            width: Val::Px(480.0),
+            height: Val::Px(12.0),
             ..default()
         },
         BackgroundColor(Color::srgb(0.16, 0.18, 0.26)),
-        BorderRadius::all(Val::Px(5.0)),
+        BorderRadius::all(Val::Px(6.0)),
     ))
     .with_children(|b| {
         b.spawn((
@@ -30,7 +30,7 @@ fn xp_bar(p: &mut ChildSpawnerCommands, into: u32, need: u32) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.45, 0.8, 1.0)),
-            BorderRadius::all(Val::Px(5.0)),
+            BorderRadius::all(Val::Px(6.0)),
         ));
     });
 }
@@ -41,11 +41,11 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
     let chosen = profile.class_loadout(class);
     let guns = class.guns();
     panel(commands, false, |p| {
-        label(p, format!("{} LOADOUT", class.name().to_uppercase()), 34.0, ACCENT);
+        label(p, format!("{} LOADOUT", class.name().to_uppercase()), 38.0, ACCENT);
         label(
             p,
             format!("Career level {level}   {into} / {need} XP to the next"),
-            17.0,
+            18.0,
             Color::WHITE,
         );
         xp_bar(p, into, need);
@@ -59,7 +59,7 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                 abilities[1].name(),
                 abilities[1].def().desc
             ),
-            15.0,
+            16.0,
             ACCENT,
         );
         // Primary on the left, secondary on the right.
@@ -72,15 +72,15 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
             for (slot, options) in [guns.primaries, guns.secondaries].into_iter().enumerate() {
                 cols.spawn(Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(7.0),
-                    width: Val::Px(540.0),
+                    row_gap: Val::Px(8.0),
+                    width: Val::Px(550.0),
                     ..default()
                 })
                 .with_children(|p| {
                     label(
                         p,
                         if slot == 0 { "PRIMARY" } else { "SECONDARY" },
-                        19.0,
+                        22.0,
                         Color::WHITE,
                     );
                     row(p, |r| {
@@ -90,7 +90,7 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                                     r,
                                     gun_def(g).name,
                                     UiAction::LoadoutGun(slot as u8, g),
-                                    Some(250.0),
+                                    Some(266.0),
                                     chosen[slot].0 == g,
                                 );
                             } else {
@@ -99,7 +99,7 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                                     r,
                                     format!("{} (lv {lv})", gun_def(g).name),
                                     UiAction::Locked,
-                                    Some(250.0),
+                                    Some(266.0),
                                     false,
                                 );
                             }
@@ -109,7 +109,7 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                     label(
                         p,
                         format!("Right mouse: {}", alt_fire(gun).describe()),
-                        15.0,
+                        16.0,
                         DIM,
                     );
                     attach_rows(p, level, slot, gun, attach);
@@ -121,10 +121,10 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                 r,
                 "Attachment Guide",
                 UiAction::OpenGuide(0),
-                Some(260.0),
+                Some(280.0),
                 false,
             );
-            button_sized(r, "Back", UiAction::BackToMain, Some(260.0), false);
+            button_sized(r, "Back", UiAction::BackToMain, Some(280.0), false);
         });
     });
 }
@@ -144,7 +144,7 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
             pct(h.reload),
             pct(h.damage)
         ),
-        14.0,
+        15.0,
         Color::WHITE,
     );
     for (i, slot) in Slot::ALL.into_iter().enumerate() {
@@ -162,12 +162,12 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
             r.spawn((
                 Text::new(slot.name()),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 16.0,
                     ..default()
                 },
                 TextColor(DIM),
                 Node {
-                    width: Val::Px(96.0),
+                    width: Val::Px(104.0),
                     ..default()
                 },
             ));
@@ -175,7 +175,7 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
                 r,
                 "None",
                 UiAction::LoadoutAttach(gun_slot as u8, i as u8, 0),
-                Some(70.0),
+                Some(76.0),
                 fitted == 0,
             );
             for &id in choices {
@@ -190,12 +190,12 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
                         r,
                         ATTACHMENTS[index].name,
                         UiAction::LoadoutAttach(gun_slot as u8, i as u8, id),
-                        Some(115.0),
+                        Some(126.0),
                         fitted == id,
                     );
                 } else {
                     let lv = unlock_level(Unlock::Attachment(index));
-                    button_sized(r, format!("Lv {lv}"), UiAction::Locked, Some(115.0), false);
+                    button_sized(r, format!("Lv {lv}"), UiAction::Locked, Some(126.0), false);
                 }
             }
         });
@@ -205,15 +205,15 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
 pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) {
     let level = career(profile.career_xp).0;
     panel(commands, false, |p| {
-        label(p, "ATTACHMENT GUIDE", 34.0, ACCENT);
+        label(p, "ATTACHMENT GUIDE", 38.0, ACCENT);
         row(p, |r| {
-            button_sized(r, "All", UiAction::OpenGuide(0), Some(80.0), tab == 0);
+            button_sized(r, "All", UiAction::OpenGuide(0), Some(90.0), tab == 0);
             for (i, slot) in Slot::ALL.into_iter().enumerate() {
                 button_sized(
                     r,
                     slot.name(),
                     UiAction::OpenGuide(i as u8 + 1),
-                    Some(120.0),
+                    Some(140.0),
                     tab == i as u8 + 1,
                 );
             }
@@ -221,7 +221,7 @@ pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) 
         label(
             p,
             "The Armory fits random attachments to the gun in your hands.\nYour class guns start with the ones you pick.",
-            14.0,
+            16.0,
             DIM,
         );
         let shown = ATTACHMENTS
@@ -233,19 +233,19 @@ pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) 
             for (i, a) in shown {
                 r.spawn((
                     Node {
-                        width: Val::Px(250.0),
+                        width: Val::Px(280.0),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(3.0),
-                        padding: UiRect::all(Val::Px(10.0)),
+                        row_gap: Val::Px(4.0),
+                        padding: UiRect::all(Val::Px(12.0)),
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.12, 0.13, 0.19, 0.9)),
                     BorderColor(Color::srgb(0.3, 0.32, 0.42)),
-                    BorderRadius::all(Val::Px(6.0)),
+                    BorderRadius::all(Val::Px(7.0)),
                 ))
                 .with_children(|c| {
-                    label(c, a.name, 18.0, ACCENT);
+                    label(c, a.name, 22.0, ACCENT);
                     let lock = if attachment_unlocked(level, i) {
                         "Unlocked for your loadout".to_string()
                     } else {
@@ -254,19 +254,19 @@ pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) 
                             unlock_level(Unlock::Attachment(i))
                         )
                     };
-                    label(c, format!("{}  -  {lock}", a.slot.name()), 12.0, DIM);
-                    label(c, a.blurb, 13.0, Color::WHITE);
+                    label(c, format!("{}  -  {lock}", a.slot.name()), 14.0, DIM);
+                    label(c, a.blurb, 15.0, Color::WHITE);
                     for (good, e) in a.effects() {
                         let color = match good {
                             Some(true) => Color::srgb(0.5, 1.0, 0.6),
                             Some(false) => Color::srgb(1.0, 0.55, 0.45),
                             None => Color::srgb(0.6, 0.85, 1.0),
                         };
-                        label(c, e, 13.0, color);
+                        label(c, e, 15.0, color);
                     }
                 });
             }
         });
-        button_sized(p, "Back", UiAction::BackToMain, Some(260.0), false);
+        button_sized(p, "Back", UiAction::BackToMain, Some(280.0), false);
     });
 }

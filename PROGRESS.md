@@ -83,7 +83,7 @@ Released: the v12 Windows zip, and the code pushed to GitHub on branch `claude/e
 
 - The public IP lookup (api.ipify.org, then checkip.amazonaws.com, then icanhazip.com) could only be tested against a fake service. Check it on a real PC.
 - Multiplayer has only been tested on one machine running several copies of the game.
-- Effects the host sends out (tracers, explosions, other players' pings) ride in snapshots and aren't resent if a packet is lost. Actions sent to the host (purchases, abilities, pings) are resent until confirmed.
+- Ambient effects the host sends out (bullet tracers, explosions) ride in fire-and-forget snapshots, while important match events and effects (pings, power-up pickups, boss phases/down) ride in a reliable sequenced acknowledgement queue until confirmed.
 - Sandbox spawns ignore walls: zombies always appear 9 m in front of you, even if that's inside a wall. With the indoor maps this happens more often.
 - v7 abilities were only tested solo under lavapipe (2 fps). Their balance (damage, cooldowns) is a first pass and untested in co-op.
 - The new maps haven't been played on a real GPU; map 2 has about 47 lights.
@@ -106,14 +106,31 @@ Released: the v12 Windows zip, and the code pushed to GitHub on branch `claude/e
 
 - Part 7 of the art brief: skin rarity looks (a different finish per rarity).
 - Jonah likes big maps with many rooms to traverse and explore; keep new maps that way.
-- Resend important effects (pings, power-up pickups) until clients confirm them.
+- [Done] Resend important effects and match events (pings, power-up pickups, revives, boss events) until clients confirm them.
 - More loadout slots (a second gun, a perk).
 - Show a 3D preview of a newly unlocked gun on the end screen (it only lists the name now).
 
 ## Next session
 
-v12.0 is released. Next on the Game Overhaul plan:
-- v13.0: procedural maps for each run, plus 10 new map themes. Jonah likes big maps with many rooms to explore.
-- v14.0: a sound design pass and a menu rework (bigger text, decorative but simple).
+- v12.1 overhaul (Audio, Feel, UI, Engine, Net):
+  - Engine & compiler: added `#![recursion_limit = "256"]` in `main.rs` to fix trait recursion warning; removed deprecated legacy effects `Fx::Spear`, `Fx::Beam`, `Fx::Nova`, `Fx::Cone` and obsolete mesh builders (`Pending`, `spear_kit`).
+  - Audio synthesis: added procedural sub-bass thump (`90 Hz -> 35 Hz`) for visceral explosions, slams, and heavy gunfire; added crisp metallic high-frequency headshot/crit ding; added dedicated `Snd::Slam` category.
+  - Gunplay & Combat Feel: dynamic reticle bloom expanding on weapon spray and movement velocity; distinctive amber/golden headshot hitmarkers with enlarged ticks; smoothed weapon recoil recovery; added micro-stagger/flinch velocity dampening on zombies hit with heavy damage (>= 75 dmg, or headshots >= 40 dmg).
+  - CoD Zombie Animation Overhaul:
+    - Speed-adaptive gaits in `src/rig/mod.rs` (`zombie_pose`): terrifying asymmetrical dragging limp with erratic hunched sway, grotesque twitching head spasms, and hungry claw-reaching hands at walking speeds (< 3.0 m/s); aggressive 37° forward-leaning rabid sprints with violently pumping claw arms and rapid driving strides at high speeds.
+    - Aggressive cycling attack variants in `src/rig/mod.rs` & `src/zombies.rs`: right-hand claw swipe, left hook claw slash, and lunging two-handed grapple biting strike.
+    - Visceral ballistic hit flinch: violent head snap-back, spine rotation twisting away from bullet entry angles, buckling pelvis, and ballistic arm jolts.
+    - Explosive CoD-style death crumples in `death_pose`: ballistic knockback slamming onto back with muscle twitches, instant knee-buckling headshot faceplants, and momentum-driven spin crumples.
+  - CoD Gunshot Audio & On-Hit Audio Synthesis:
+    - 4-stage gunshot physical synthesis in `src/audio/synth.rs`: supersonic crack and mechanical action snap transient, saturated concussive bark body (`tanh` soft-clipping), visceral pitch-dropping sub-bass thump, and multi-tap spatial reverberation tail.
+    - Iconic weapon profiles: M1911 pistol action crack, Magnum hand-cannon roar with metallic ringing, Shotgun close-range wallop with 92Hz sub-kick, Assault Rifle staccato bark, SMG rapid muzzle snap, and high-caliber Sniper rifle thunder.
+    - Tactile CoD on-hit feedback: meaty low-mid flesh squelch and crisp mechanical 'thwip/tick' hitmarker (`HitTick`), iconic skull-pop bone fracture crunch with bell overtone confirmation (`HitHead`), heavy bone-crushing kill finish (`Kill`), and fleshy bullet squelches layered into zombie hurt audio.
+  - CoD On-Hit & Visual Gore Overhaul:
+    - Directional blood splatter and flesh spray on every bullet and damage impact in `src/fx/mod.rs` (`Fx::Blood`). Visceral crimson blood material (`Color::srgb(0.55, 0.03, 0.03)` with wet specular shine and subtle luminescence), expanding blood mist, flesh gore chunks, and tumbling bone chips.
+    - Dramatic headshot gore burst with expanding red mist spheres, high-velocity arterial droplet arcs, shattering skull bone fragments, crimson point light flash, and lasting ground blood puddles (`Grow::Hold`).
+    - Decapitation blood fountain on fatal headshots: arterial blood geyser and high-pressure spurts jetting upward from the severed neck with vertebrae splinters, flesh chunks, and pooling blood (`Fx::Decapitation`).
+    - Subtle visceral camera punch on nearby headshot crits and decapitations in `src/feel.rs`, plus full shader pre-warming in `warm_up()`.
+    - CoD Zombies style hitmarker in `src/hud.rs`: 4 sharp diagonal ticks snapping dynamically outward/inward, crisp silver ticks with central red flash on body hits, bold crimson-amber ticks with enlarged tick geometry on critical hits, and a prominent red kill confirmation flash on lethal eliminations.
+  - UI & UX typography: added dynamic `ui_scale` in settings (`0.8x..=1.5x`) with 100% backward-compatible config serialization; enlarged fonts, padding, and contrast across Main Menu, Lobby, Settings, Pause, and Loadout; expanded HUD round prompts, ammo readout, and boss health bar.
+  - Network reliability: implemented reliable sequenced event acknowledgement queue over UDP for critical match events (pings, power-ups, player downs/revives, boss phases); bumped `PROTOCOL_VERSION` to 13.
 
-Small cleanups left from v12: `Fx::Spear`, `Fx::Beam`, `Fx::Nova` and `Fx::Cone` (and their meshes, `Pending`, `spear_kit`) are no longer sent by any ability; only the effects warm-up in `feel.rs` and the audio still mention them.

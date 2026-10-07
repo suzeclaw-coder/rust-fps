@@ -119,6 +119,8 @@ pub struct EnemyBrain {
     pub swing: f32,
     /// Stunned: can't move or attack.
     pub stun: f32,
+    /// Brief flinch / stagger from heavy single-hit damage or critical hits.
+    pub flinch: f32,
     /// A Brute slam is winding up (it lands `slam_spec` windup after the swing starts).
     slam: bool,
     /// Bosses: seconds to the next fireball volley, and summons used (at
@@ -528,10 +530,10 @@ fn process_actions(
                             enemy_scale(b.kind),
                             b.crawler,
                         )
-                        .map(|d| (e, d, b))
+                        .map(|d| (e, d, b, t.translation))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1));
-                if let Some((e, _, b)) = target {
+                if let Some((e, _, b, e_pos)) = target {
                     // Bosses only lose a sliver to a knife.
                     let share = if b.kind.is_boss() { 0.01 } else { 0.2 };
                     let amount = (150.0 + share * b.max_health) * level_multiplier(p);
@@ -539,6 +541,15 @@ fn process_actions(
                     if amount >= b.health || state.insta_kill > 0.0 {
                         give_points(p, 70, &state);
                     }
+                    emit(
+                        &mut fx,
+                        &mut out,
+                        Fx::Blood {
+                            pos: (e_pos + Vec3::Y * 1.1).to_array(),
+                            dir: dir.to_array(),
+                            headshot: false,
+                        },
+                    );
                     damage.0.push(DamageEvent {
                         target: e,
                         amount,
@@ -802,6 +813,15 @@ fn resolve_shots(
         let Some((entity, headshot)) = hit.enemy else {
             continue;
         };
+        emit(
+            &mut fx,
+            &mut out,
+            Fx::Blood {
+                pos: end.to_array(),
+                dir: dir.to_array(),
+                headshot,
+            },
+        );
         // A slug hits as hard as the whole spread, a little less.
         let pellets = if alt == AltFire::Slug {
             def.pellets as f32 * 0.9
@@ -897,6 +917,7 @@ fn status_effects(
         status.flash -= dt;
         b.slow -= dt;
         b.stun -= dt;
+        b.flinch -= dt;
         if b.burn > 0.0 {
             b.burn -= dt;
             damage.0.push(DamageEvent {
@@ -998,8 +1019,16 @@ fn apply_damage(
             _ => 1.0,
         };
         brain.stun = brain.stun.max(stun * resist);
+        // Heavy single-hit damage (slugs, sniper rifle shots, high-impact hits)
+        // or critical hits trigger a micro-stagger / momentary flinch so impactful shots feel weighty.
+        let heavy_threshold = 75.0;
+        let is_heavy_hit = amount >= heavy_threshold || (headshot && amount >= 40.0);
+        if is_heavy_hit && !brain.kind.is_boss() {
+            let flinch_duration = if headshot { 0.18 } else { 0.12 } * resist;
+            brain.flinch = brain.flinch.max(flinch_duration);
+        }
         if !chained || amount > 5.0 {
-            status.flash = 0.08;
+            status.flash = if headshot { 0.12 } else { 0.08 };
         }
         let pos = tf.translation;
         for el in elements_in(elements) {
@@ -1106,6 +1135,32 @@ fn apply_damage(
             }
         }
         if killed {
+            let hit_h = if headshot { 1.5 } else if legs { 0.4 } else { 1.0 };
+            let hit_pos = pos + Vec3::Y * (hit_h * enemy_scale(brain.kind));
+            let shot_dir = if let Some(pid) = from.and_then(|id| roster.0.get(&id)) {
+                (pos - pid.feet()).normalize_or(Vec3::Z)
+            } else {
+                Vec3::Y
+            };
+            emit(
+                &mut fx,
+                &mut out,
+                Fx::Blood {
+                    pos: hit_pos.to_array(),
+                    dir: shot_dir.to_array(),
+                    headshot,
+                },
+            );
+            if headshot && !brain.kind.is_boss() {
+                let neck_pos = pos + Vec3::Y * (1.35 * enemy_scale(brain.kind));
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Decapitation {
+                        pos: neck_pos.to_array(),
+                    },
+                );
+            }
             crate::zombies::kill(&mut commands, target);
             if let NetKind::Boss(level) = brain.kind {
                 boss_down = Some(level);
@@ -1446,6 +1501,7 @@ fn spawn_zombie(
         crawler,
         swing: 9.0,
         stun: 0.0,
+        flinch: 0.0,
         slam: false,
         volley: 3.0,
         summons: 0,
@@ -1583,9 +1639,12 @@ fn enemy_ai(
         };
         // The final boss gets faster when it's nearly dead.
         let enraged = enemy.kind == NetKind::Boss(1) && enemy.health < enemy.max_health * 0.3;
+        // Apply brief speed dampening / momentary stagger when flinching from heavy/critical shots
+        let flinch_factor = if enemy.flinch > 0.0 { 0.25 } else { 1.0 };
         let speed = enemy.speed
             * if enemy.slow > 0.0 { 0.5 } else { 1.0 }
-            * if enraged { 1.4 } else { 1.0 };
+            * if enraged { 1.4 } else { 1.0 }
+            * flinch_factor;
         let (windup, slam_radius, slam_ahead, slam_damage) = slam_spec(enemy.kind);
         let desired = match enemy.kind {
             NetKind::Shooter if sees => 12.0,

@@ -485,7 +485,11 @@ pub fn movement(
         EYE_HEIGHT
     };
     p.eye += (target_eye - p.eye) * (1.0 - (-14.0 * dt).exp());
-    p.kick *= (-12.0 * dt).exp();
+    // Smooth camera recoil recovery: quick initial snapback smoothly decelerating to rest
+    p.kick *= (-14.0 * dt).exp();
+    if p.kick.abs() < 1e-4 {
+        p.kick = 0.0;
+    }
     let roll = if p.sliding > 0.0 { 0.06 } else { 0.0 };
     tf.translation = p.eye_pos();
     tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).min(1.5), roll);

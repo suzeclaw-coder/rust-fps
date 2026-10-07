@@ -1,9 +1,7 @@
 //! Visual effects: bullet tracers, explosions (fireball, shockwave, smoke,
 //! debris, sparks, scorch mark), Heal Pulse (green ring, light column and
-//! rising crosses), Frost Nova (ice spikes bursting from the ground, frost and
-//! mist), the Orbital Strike (target marker, sky laser, beam and blast), Dash
-//! afterimages and lightning arcs. The host broadcasts effects so every
-//! player sees them.
+//! rising crosses), Dash afterimages and lightning arcs. The host broadcasts
+//! effects so every player sees them.
 
 pub mod auras;
 mod spells;
@@ -14,7 +12,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::TAU;
 
-use crate::kit::{c, vertex_material, Kit};
+use crate::kit::{c, Kit};
 use crate::sim::powers::{zone as zk, PLAGUE_GROW, PLAGUE_MAX};
 use crate::{AppState, InGameEntity, Phase};
 
@@ -39,7 +37,6 @@ impl Plugin for FxPlugin {
                     animate,
                     bullets,
                     particles,
-                    markers,
                     spells::fall,
                     spells::warns,
                     spells::twirls,
@@ -55,7 +52,7 @@ impl Plugin for FxPlugin {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Fx {
     /// Bullet tracer from a player (`shooter`) so they can skip their own.
     Tracer {
@@ -77,26 +74,12 @@ pub enum Fx {
         a: [f32; 3],
         b: [f32; 3],
     },
-    /// Valkyrie's Arc Spear flying from `a` to `b`.
-    Spear {
-        a: [f32; 3],
-        b: [f32; 3],
-    },
     /// Valkyrie's Storm Leap crashing down.
     Slam {
         pos: [f32; 3],
         radius: f32,
     },
-    Beam {
-        pos: [f32; 3],
-        radius: f32,
-        delay: f32,
-    },
     Heal {
-        pos: [f32; 3],
-        radius: f32,
-    },
-    Nova {
         pos: [f32; 3],
         radius: f32,
     },
@@ -112,12 +95,6 @@ pub enum Fx {
         pos: [f32; 3],
         dir: [f32; 3],
         radius: f32,
-    },
-    /// A cone of flame.
-    Cone {
-        pos: [f32; 3],
-        dir: [f32; 3],
-        range: f32,
     },
     /// A lasting area effect (see `sim::powers::zone` for the kinds).
     /// `follow` is a player id (255 stays put).
@@ -159,6 +136,16 @@ pub enum Fx {
         pos: [f32; 3],
         target: u32,
     },
+    /// Blood splatter and flesh gore from bullet or damage impact on a zombie.
+    Blood {
+        pos: [f32; 3],
+        dir: [f32; 3],
+        headshot: bool,
+    },
+    /// Decapitation blood fountain spraying upward when a zombie dies from a headshot.
+    Decapitation {
+        pos: [f32; 3],
+    },
 }
 
 /// Effects to show on this machine this frame.
@@ -180,7 +167,6 @@ pub struct FxAssets {
     beam: Handle<Mesh>,
     ring: Handle<Mesh>,
     cube: Handle<Mesh>,
-    spike: Handle<Mesh>,
     cross: Handle<Mesh>,
     marker: Handle<Mesh>,
     ghost: Handle<Mesh>,
@@ -189,56 +175,17 @@ pub struct FxAssets {
     debris: Handle<StandardMaterial>,
     spark: Handle<StandardMaterial>,
     scorch: Handle<StandardMaterial>,
-    ice: Handle<StandardMaterial>,
-    frost: Handle<StandardMaterial>,
-    mist: Handle<StandardMaterial>,
     heal: Handle<StandardMaterial>,
     heal_soft: Handle<StandardMaterial>,
     beam_core: Handle<StandardMaterial>,
-    beam_outer: Handle<StandardMaterial>,
-    marker_mat: Handle<StandardMaterial>,
     ghost_mat: Handle<StandardMaterial>,
     tracer: Handle<StandardMaterial>,
     tracer_mesh: Handle<Mesh>,
     bolt: Handle<StandardMaterial>,
-    spear: Handle<Mesh>,
-    spear_mat: Handle<StandardMaterial>,
-}
-
-/// Valkyrie's spear: a long shaft with a leaf blade and a crossbar, built
-/// along +Y so it can be pointed along its flight.
-pub(crate) fn spear_kit() -> Kit {
-    let mut k = Kit::fine();
-    let steel = c(0.85, 0.9, 1.0);
-    let shaft = c(0.35, 0.6, 1.0);
-    k.cyl(Vec3::new(0.0, -0.4, 0.0), 0.025, 1.6, Quat::IDENTITY, shaft);
-    k.blob(
-        Vec3::new(0.0, 0.55, 0.0),
-        Vec3::new(0.07, 0.25, 0.018),
-        steel,
-    );
-    k.cone(
-        Vec3::new(0.0, 0.85, 0.0),
-        0.035,
-        0.12,
-        Quat::IDENTITY,
-        steel,
-    );
-    k.cuboid(
-        Vec3::new(0.0, 0.32, 0.0),
-        Vec3::new(0.22, 0.03, 0.03),
-        steel,
-    );
-    for i in 0..4 {
-        k.torus(
-            Vec3::new(0.0, -0.1 - i as f32 * 0.3, 0.0),
-            0.008,
-            0.03,
-            Quat::IDENTITY,
-            c(0.9, 0.95, 1.0),
-        );
-    }
-    k
+    blood: Handle<StandardMaterial>,
+    blood_mist: Handle<StandardMaterial>,
+    flesh: Handle<StandardMaterial>,
+    bone: Handle<StandardMaterial>,
 }
 
 /// A jagged lightning bolt from `from` to `to`, made of glowing segments.
@@ -285,8 +232,6 @@ struct Bullet {
     a: Vec3,
     b: Vec3,
     travelled: f32,
-    /// Valkyrie's spear rather than a bullet.
-    spear: bool,
 }
 
 /// How fast tracers fly and how long the glowing streak is.
@@ -331,8 +276,6 @@ enum Grow {
     Ball(f32),
     /// Flat shape (ring, disc) spreading to this radius.
     Flat(f32),
-    /// Spreads quickly to this radius, holds, then shrinks away (frost).
-    Sheet(f32),
     /// Keeps its size, shrinks away at the end (scorch marks).
     Hold,
     /// A tall column that thins out.
@@ -371,15 +314,6 @@ struct Particle {
     lands: bool,
 }
 
-/// Orbital strike marker counting down to the blast.
-#[derive(Component)]
-struct Pending {
-    delay: f32,
-    total: f32,
-    pos: Vec3,
-    radius: f32,
-}
-
 /// An ice spike: shoots up out of the ground, then sinks back.
 #[derive(Component)]
 struct Spike {
@@ -389,27 +323,6 @@ struct Spike {
     base: Vec3,
     /// Seconds before it bursts up.
     delay: f32,
-}
-
-fn spike_kit() -> Kit {
-    let mut k = Kit::new();
-    let ice = c(0.75, 0.92, 1.0);
-    k.cone(Vec3::new(0.0, 0.5, 0.0), 0.18, 1.0, Quat::IDENTITY, ice);
-    k.cone(
-        Vec3::new(0.08, 0.3, 0.05),
-        0.1,
-        0.6,
-        Quat::from_rotation_z(-0.35),
-        c(0.6, 0.85, 1.0),
-    );
-    k.cone(
-        Vec3::new(-0.07, 0.25, -0.05),
-        0.08,
-        0.5,
-        Quat::from_rotation_x(0.4),
-        c(0.85, 0.96, 1.0),
-    );
-    k
 }
 
 fn cross_kit() -> Kit {
@@ -486,13 +399,6 @@ fn setup(
             unlit: true,
             ..default()
         }),
-        spear: meshes.add(spear_kit().build_or_empty()),
-        spear_mat: materials.add(StandardMaterial {
-            base_color: LinearRgba::rgb(2.5, 3.5, 5.0).into(),
-            unlit: true,
-            ..default()
-        }),
-        spike: meshes.add(spike_kit().build_or_empty()),
         cross: meshes.add(cross_kit().build_or_empty()),
         marker: meshes.add(marker_kit().build_or_empty()),
         ghost: meshes.add(Capsule3d::new(0.35, 1.1)),
@@ -515,29 +421,35 @@ fn setup(
             perceptual_roughness: 1.0,
             ..default()
         }),
-        ice: materials.add(StandardMaterial {
-            emissive: LinearRgba::rgb(0.1, 0.3, 0.5),
-            perceptual_roughness: 0.15,
-            ..vertex_material(0.15, 0.0)
-        }),
-        frost: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.8, 0.93, 1.0, 0.55),
-            alpha_mode: AlphaMode::Blend,
-            emissive: LinearRgba::rgb(0.1, 0.2, 0.3),
-            perceptual_roughness: 0.2,
-            ..default()
-        }),
-        mist: unlit(&mut materials, Color::srgba(0.85, 0.95, 1.0, 0.35)),
         heal: unlit(&mut materials, Color::srgb(0.35, 1.0, 0.5)),
         heal_soft: unlit(&mut materials, Color::srgba(0.35, 1.0, 0.5, 0.25)),
         beam_core: unlit(&mut materials, Color::srgb(1.0, 0.95, 0.85)),
-        beam_outer: unlit(&mut materials, Color::srgba(1.0, 0.45, 0.15, 0.4)),
-        marker_mat: materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
+        ghost_mat: unlit(&mut materials, Color::srgba(0.4, 0.75, 1.0, 0.3)),
+        blood: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.03, 0.03),
+            perceptual_roughness: 0.25,
+            reflectance: 0.85,
+            emissive: LinearRgba::rgb(0.08, 0.005, 0.005),
             ..default()
         }),
-        ghost_mat: unlit(&mut materials, Color::srgba(0.4, 0.75, 1.0, 0.3)),
+        blood_mist: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.60, 0.03, 0.03, 0.65),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 1.0,
+            ..default()
+        }),
+        flesh: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 0.04, 0.04),
+            perceptual_roughness: 0.5,
+            reflectance: 0.6,
+            ..default()
+        }),
+        bone: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.88, 0.85, 0.78),
+            perceptual_roughness: 0.7,
+            reflectance: 0.35,
+            ..default()
+        }),
     };
     commands.insert_resource(assets);
 }
@@ -762,6 +674,394 @@ fn explosion(
     );
 }
 
+/// Spawns visceral blood splatter, flesh gore chunks, mist, and bone chips.
+fn blood_splatter(
+    commands: &mut Commands,
+    a: &FxAssets,
+    pos: Vec3,
+    dir: Vec3,
+    headshot: bool,
+    rng: &mut impl Rng,
+) {
+    let dir = dir.normalize_or(Vec3::Z);
+    if headshot {
+        // Dramatic explosive red blood mist burst
+        for _ in 0..8 {
+            let d = rand_dir(rng);
+            particle(
+                commands,
+                &a.ball,
+                &a.blood_mist,
+                pos + d * rng.gen_range(0.05..0.2),
+                Particle {
+                    vel: d * rng.gen_range(1.5..4.5) + Vec3::Y * rng.gen_range(0.5..1.8),
+                    life: rng.gen_range(0.35..0.65),
+                    max: 0.65,
+                    gravity: -0.4,
+                    drag: 2.2,
+                    size: (rng.gen_range(0.12..0.22), rng.gen_range(0.35..0.65)),
+                    pop: 0.15,
+                    spin: Vec3::ZERO,
+                    lands: false,
+                },
+            );
+        }
+        // Skull bone chips flying outward violently
+        for _ in 0..12 {
+            let d = rand_dir(rng);
+            let s = rng.gen_range(0.035..0.065);
+            particle(
+                commands,
+                &a.cube,
+                &a.bone,
+                pos,
+                Particle {
+                    vel: (d * 1.5 + Vec3::Y * 0.8).normalize_or_zero() * rng.gen_range(5.0..11.0),
+                    life: rng.gen_range(0.8..1.5),
+                    max: 1.5,
+                    gravity: 16.0,
+                    drag: 0.3,
+                    size: (s, s),
+                    pop: 0.0,
+                    spin: rand_dir(rng) * 22.0,
+                    lands: true,
+                },
+            );
+        }
+        // Crimson arterial droplets flying outward in an explosive arc
+        for _ in 0..24 {
+            let d = (dir * 1.5 + rand_dir(rng)).normalize_or_zero();
+            let s = rng.gen_range(0.04..0.09);
+            particle(
+                commands,
+                &a.ball,
+                &a.blood,
+                pos,
+                Particle {
+                    vel: d * rng.gen_range(4.0..12.0) + Vec3::Y * rng.gen_range(1.0..3.5),
+                    life: rng.gen_range(0.6..1.2),
+                    max: 1.2,
+                    gravity: 15.0,
+                    drag: 0.8,
+                    size: (s, s * 0.4),
+                    pop: 0.05,
+                    spin: Vec3::ZERO,
+                    lands: true,
+                },
+            );
+        }
+        // Flesh / gore chunks
+        for _ in 0..8 {
+            let d = rand_dir(rng);
+            let s = rng.gen_range(0.05..0.10);
+            particle(
+                commands,
+                &a.cube,
+                &a.flesh,
+                pos,
+                Particle {
+                    vel: (d + dir * 0.8).normalize_or_zero() * rng.gen_range(3.0..8.0)
+                        + Vec3::Y * rng.gen_range(1.0..3.0),
+                    life: rng.gen_range(0.8..1.6),
+                    max: 1.6,
+                    gravity: 15.0,
+                    drag: 0.4,
+                    size: (s, s * 0.7),
+                    pop: 0.0,
+                    spin: rand_dir(rng) * 15.0,
+                    lands: true,
+                },
+            );
+        }
+        // Visceral crimson light flash illuminating surroundings
+        flash_light(
+            commands,
+            pos + Vec3::Y * 0.2,
+            Color::srgb(0.85, 0.04, 0.04),
+            85_000.0,
+            6.5,
+            0.18,
+        );
+        // Ground blood stain
+        let ground = pos.with_y(0.02);
+        let puddle_r = rng.gen_range(0.45..0.85);
+        burst(
+            commands,
+            &a.disc,
+            a.blood.clone(),
+            Transform::from_translation(ground).with_scale(Vec3::new(puddle_r, 1.0, puddle_r)),
+            7.0,
+            Grow::Hold,
+        );
+    } else {
+        // Standard body hit:
+        // Directional cone of blood droplets in bullet direction (wound exit)
+        for _ in 0..12 {
+            let spread = Vec3::new(
+                rng.gen_range(-0.35..0.35),
+                rng.gen_range(-0.25..0.4),
+                rng.gen_range(-0.35..0.35),
+            );
+            let d = (dir + spread).normalize_or_zero();
+            let s = rng.gen_range(0.03..0.06);
+            particle(
+                commands,
+                &a.ball,
+                &a.blood,
+                pos + d * 0.05,
+                Particle {
+                    vel: d * rng.gen_range(3.5..8.5) + Vec3::Y * rng.gen_range(0.5..2.0),
+                    life: rng.gen_range(0.4..0.9),
+                    max: 0.9,
+                    gravity: 14.0,
+                    drag: 1.2,
+                    size: (s, s * 0.5),
+                    pop: 0.05,
+                    spin: Vec3::ZERO,
+                    lands: true,
+                },
+            );
+        }
+        // Back-splatter from entrance wound
+        for _ in 0..5 {
+            let back = -dir
+                + Vec3::new(
+                    rng.gen_range(-0.4..0.4),
+                    rng.gen_range(0.0..0.4),
+                    rng.gen_range(-0.4..0.4),
+                );
+            let s = rng.gen_range(0.025..0.045);
+            particle(
+                commands,
+                &a.ball,
+                &a.blood,
+                pos,
+                Particle {
+                    vel: back.normalize_or_zero() * rng.gen_range(2.0..5.0) + Vec3::Y * 0.8,
+                    life: rng.gen_range(0.3..0.6),
+                    max: 0.6,
+                    gravity: 12.0,
+                    drag: 1.8,
+                    size: (s, s * 0.3),
+                    pop: 0.05,
+                    spin: Vec3::ZERO,
+                    lands: true,
+                },
+            );
+        }
+        // Flesh spray
+        for _ in 0..5 {
+            let d = (dir
+                + Vec3::new(
+                    rng.gen_range(-0.5..0.5),
+                    rng.gen_range(-0.2..0.6),
+                    rng.gen_range(-0.5..0.5),
+                ))
+            .normalize_or_zero();
+            let s = rng.gen_range(0.035..0.065);
+            particle(
+                commands,
+                &a.cube,
+                &a.flesh,
+                pos,
+                Particle {
+                    vel: d * rng.gen_range(2.5..6.0) + Vec3::Y * rng.gen_range(0.5..1.8),
+                    life: rng.gen_range(0.5..1.1),
+                    max: 1.1,
+                    gravity: 15.0,
+                    drag: 0.6,
+                    size: (s, s * 0.6),
+                    pop: 0.0,
+                    spin: rand_dir(rng) * 12.0,
+                    lands: true,
+                },
+            );
+        }
+        // Blood mist puff
+        for _ in 0..2 {
+            particle(
+                commands,
+                &a.ball,
+                &a.blood_mist,
+                pos,
+                Particle {
+                    vel: dir * 1.2 + Vec3::Y * rng.gen_range(0.3..0.8),
+                    life: rng.gen_range(0.25..0.45),
+                    max: 0.45,
+                    gravity: -0.2,
+                    drag: 2.5,
+                    size: (0.08, 0.24),
+                    pop: 0.1,
+                    spin: Vec3::ZERO,
+                    lands: false,
+                },
+            );
+        }
+        // Small ground stain
+        if rng.gen_bool(0.4) {
+            let ground = pos.with_y(0.02);
+            let puddle_r = rng.gen_range(0.25..0.45);
+            burst(
+                commands,
+                &a.disc,
+                a.blood.clone(),
+                Transform::from_translation(ground).with_scale(Vec3::new(puddle_r, 1.0, puddle_r)),
+                5.0,
+                Grow::Hold,
+            );
+        }
+    }
+}
+
+/// Decapitation blood fountain spraying upward from the neck stump when a zombie dies from a headshot.
+fn decapitation_fountain(
+    commands: &mut Commands,
+    a: &FxAssets,
+    pos: Vec3,
+    rng: &mut impl Rng,
+) {
+    // Geyser of arterial blood droplets
+    for _ in 0..36 {
+        let spread_x = rng.gen_range(-0.5..0.5);
+        let spread_z = rng.gen_range(-0.5..0.5);
+        let up_speed = rng.gen_range(5.5..11.0);
+        let s = rng.gen_range(0.04..0.085);
+        particle(
+            commands,
+            &a.ball,
+            &a.blood,
+            pos + Vec3::new(rng.gen_range(-0.08..0.08), 0.0, rng.gen_range(-0.08..0.08)),
+            Particle {
+                vel: Vec3::new(spread_x * 2.8, up_speed, spread_z * 2.8),
+                life: rng.gen_range(0.7..1.4),
+                max: 1.4,
+                gravity: 16.0,
+                drag: 0.5,
+                size: (s, s * 0.4),
+                pop: 0.05,
+                spin: Vec3::ZERO,
+                lands: true,
+            },
+        );
+    }
+    // High-pressure arterial spurts (taller, thinner)
+    for _ in 0..12 {
+        let spread_x = rng.gen_range(-0.25..0.25);
+        let spread_z = rng.gen_range(-0.25..0.25);
+        let up_speed = rng.gen_range(8.0..14.0);
+        let s = rng.gen_range(0.03..0.06);
+        particle(
+            commands,
+            &a.ball,
+            &a.blood,
+            pos,
+            Particle {
+                vel: Vec3::new(spread_x * 1.5, up_speed, spread_z * 1.5),
+                life: rng.gen_range(0.9..1.6),
+                max: 1.6,
+                gravity: 18.0,
+                drag: 0.4,
+                size: (s, s * 0.3),
+                pop: 0.05,
+                spin: Vec3::ZERO,
+                lands: true,
+            },
+        );
+    }
+    // Throat / neck flesh chunks spraying up and tumbling
+    for _ in 0..10 {
+        let spread_x = rng.gen_range(-0.6..0.6);
+        let spread_z = rng.gen_range(-0.6..0.6);
+        let up_speed = rng.gen_range(3.5..7.5);
+        let s = rng.gen_range(0.06..0.12);
+        particle(
+            commands,
+            &a.cube,
+            &a.flesh,
+            pos,
+            Particle {
+                vel: Vec3::new(spread_x * 3.0, up_speed, spread_z * 3.0),
+                life: rng.gen_range(1.0..1.8),
+                max: 1.8,
+                gravity: 16.0,
+                drag: 0.3,
+                size: (s, s * 0.6),
+                pop: 0.0,
+                spin: rand_dir(rng) * 16.0,
+                lands: true,
+            },
+        );
+    }
+    // Neck vertebrae / bone splinters
+    for _ in 0..8 {
+        let s = rng.gen_range(0.035..0.065);
+        particle(
+            commands,
+            &a.cube,
+            &a.bone,
+            pos,
+            Particle {
+                vel: Vec3::new(
+                    rng.gen_range(-2.0..2.0),
+                    rng.gen_range(4.0..8.0),
+                    rng.gen_range(-2.0..2.0),
+                ),
+                life: rng.gen_range(0.8..1.5),
+                max: 1.5,
+                gravity: 17.0,
+                drag: 0.25,
+                size: (s, s),
+                pop: 0.0,
+                spin: rand_dir(rng) * 20.0,
+                lands: true,
+            },
+        );
+    }
+    // Rising blood mist column
+    for _ in 0..6 {
+        particle(
+            commands,
+            &a.ball,
+            &a.blood_mist,
+            pos + Vec3::Y * rng.gen_range(0.1..0.5),
+            Particle {
+                vel: Vec3::new(
+                    rng.gen_range(-0.4..0.4),
+                    rng.gen_range(2.0..4.0),
+                    rng.gen_range(-0.4..0.4),
+                ),
+                life: rng.gen_range(0.5..0.9),
+                max: 0.9,
+                gravity: -0.2,
+                drag: 1.6,
+                size: (0.15, rng.gen_range(0.4..0.7)),
+                pop: 0.2,
+                spin: Vec3::ZERO,
+                lands: false,
+            },
+        );
+    }
+    // Deep crimson flash light at the severed neck
+    flash_light(
+        commands,
+        pos + Vec3::Y * 0.3,
+        Color::srgb(0.75, 0.02, 0.02),
+        110_000.0,
+        7.0,
+        0.25,
+    );
+    // Large spreading ground puddle at the zombie's feet
+    let ground = pos.with_y(0.02);
+    burst(
+        commands,
+        &a.disc,
+        a.blood.clone(),
+        Transform::from_translation(ground).with_scale(Vec3::new(0.9, 1.0, 0.9)),
+        8.0,
+        Grow::Hold,
+    );
+}
+
 pub fn play(
     mut commands: Commands,
     mut queue: ResMut<FxQueue>,
@@ -790,7 +1090,6 @@ pub fn play(
                         a: from,
                         b: to,
                         travelled: 0.0,
-                        spear: false,
                     },
                     Mesh3d(a.tracer_mesh.clone()),
                     MeshMaterial3d(a.tracer.clone()),
@@ -885,91 +1184,6 @@ pub fn play(
                     );
                 }
             }
-            Fx::Nova { pos, radius } => {
-                let p = Vec3::from_array(pos);
-                // Frost sheet and an expanding cold ring.
-                burst(
-                    &mut commands,
-                    &a.disc,
-                    a.frost.clone(),
-                    Transform::from_translation(p + Vec3::Y * 0.03)
-                        .with_scale(Vec3::new(0.5, 1.0, 0.5)),
-                    2.2,
-                    Grow::Sheet(radius),
-                );
-                burst(
-                    &mut commands,
-                    &a.ring,
-                    a.mist.clone(),
-                    Transform::from_translation(p + Vec3::Y * 0.2)
-                        .with_scale(Vec3::new(0.3, 4.0, 0.3)),
-                    0.5,
-                    Grow::Flat(radius * 1.1),
-                );
-                flash_light(
-                    &mut commands,
-                    p + Vec3::Y * 1.0,
-                    Color::srgb(0.5, 0.85, 1.0),
-                    300_000.0,
-                    radius * 2.0,
-                    0.6,
-                );
-                // Spikes burst out of the ground in two rings.
-                for ring in 0..2 {
-                    let count = if ring == 0 { 9 } else { 16 };
-                    let rr = radius * if ring == 0 { 0.4 } else { 0.85 };
-                    for i in 0..count {
-                        let ang = i as f32 / count as f32 * TAU + rng.gen_range(-0.15..0.15);
-                        let base = p + Vec3::new(ang.cos() * rr, 0.0, ang.sin() * rr);
-                        let out = Vec3::new(ang.cos(), 0.0, ang.sin());
-                        let tilt = Quat::from_rotation_arc(
-                            Vec3::Y,
-                            (Vec3::Y * 2.0 + out * 0.8).normalize(),
-                        );
-                        let h = rng.gen_range(0.9..1.8) * if ring == 0 { 0.8 } else { 1.0 };
-                        let w = rng.gen_range(0.8..1.3);
-                        let delay = ring as f32 * 0.08 + rng.gen_range(0.0..0.05);
-                        commands.spawn((
-                            InGameEntity,
-                            Spike {
-                                life: 1.6 + delay,
-                                max: 1.6 + delay,
-                                scale: Vec3::new(w, h, w),
-                                base,
-                                delay: 0.0,
-                            },
-                            Mesh3d(a.spike.clone()),
-                            MeshMaterial3d(a.ice.clone()),
-                            Transform::from_translation(base)
-                                .with_rotation(
-                                    tilt * Quat::from_rotation_y(rng.gen_range(0.0..TAU)),
-                                )
-                                .with_scale(Vec3::ZERO),
-                        ));
-                    }
-                }
-                for _ in 0..16 {
-                    let d = rand_dir(&mut rng);
-                    let d = Vec3::new(d.x, 0.15, d.z).normalize();
-                    particle(
-                        &mut commands,
-                        &a.ball,
-                        &a.mist,
-                        p + Vec3::Y * 0.6,
-                        Particle {
-                            vel: d * rng.gen_range(5.0..9.0),
-                            life: rng.gen_range(0.6..1.0),
-                            max: 1.0,
-                            gravity: 0.0,
-                            drag: 3.0,
-                            size: (0.3, 1.0),
-                            pop: 0.1,
-                            spin: Vec3::ZERO,
-                            lands: false,
-                        },
-                    );
-                }
-            }
             Fx::Lightning { a: from, b: to } => {
                 let (from, to) = (Vec3::from_array(from), Vec3::from_array(to));
                 bolt(&mut commands, a, from, to, 0.05, &mut rng);
@@ -990,21 +1204,6 @@ pub fn play(
                     7.0,
                     0.15,
                 );
-            }
-            Fx::Spear { a: from, b: to } => {
-                commands.spawn((
-                    InGameEntity,
-                    Bullet {
-                        a: Vec3::from_array(from),
-                        b: Vec3::from_array(to),
-                        travelled: 0.0,
-                        spear: true,
-                    },
-                    Mesh3d(a.spear.clone()),
-                    MeshMaterial3d(a.spear_mat.clone()),
-                    Transform::from_translation(Vec3::from_array(from)),
-                    NotShadowCaster,
-                ));
             }
             Fx::Slam { pos, radius } => {
                 let p = Vec3::from_array(pos);
@@ -1059,22 +1258,6 @@ pub fn play(
                     0.3,
                 );
             }
-            Fx::Beam { pos, radius, delay } => {
-                let p = Vec3::from_array(pos);
-                commands.spawn((
-                    InGameEntity,
-                    Pending {
-                        delay,
-                        total: delay.max(0.01),
-                        pos: p,
-                        radius,
-                    },
-                    Mesh3d(a.marker.clone()),
-                    MeshMaterial3d(a.marker_mat.clone()),
-                    Transform::from_translation(p + Vec3::Y * 0.08).with_scale(Vec3::splat(radius)),
-                    NotShadowCaster,
-                ));
-            }
             Fx::Slash { pos, dir, radius } => {
                 let (p, d) = (Vec3::from_array(pos), Vec3::from_array(dir));
                 let a0 = d.z.atan2(d.x);
@@ -1122,61 +1305,6 @@ pub fn play(
                     80_000.0,
                     radius * 1.5,
                     0.25,
-                );
-            }
-            Fx::Cone { pos, dir, range } => {
-                let (p, d) = (
-                    Vec3::from_array(pos),
-                    Vec3::from_array(dir).normalize_or(Vec3::NEG_Z),
-                );
-                for _ in 0..55 {
-                    let spread = rand_dir(&mut rng) * rng.gen_range(0.0..0.35);
-                    let v = (d + spread).normalize() * range * rng.gen_range(1.6..2.4);
-                    particle(
-                        &mut commands,
-                        &a.ball,
-                        &a.fire,
-                        p + spread * 0.2,
-                        Particle {
-                            vel: v,
-                            life: rng.gen_range(0.35..0.55),
-                            max: 0.55,
-                            gravity: -2.0,
-                            drag: 1.2,
-                            size: (0.08, rng.gen_range(0.5..0.9)),
-                            pop: 0.05,
-                            spin: Vec3::ZERO,
-                            lands: false,
-                        },
-                    );
-                }
-                for _ in 0..12 {
-                    let spread = rand_dir(&mut rng) * 0.3;
-                    particle(
-                        &mut commands,
-                        &a.ball,
-                        &a.smoke,
-                        p + d * range * 0.6,
-                        Particle {
-                            vel: (d + spread) * 3.0 + Vec3::Y * 1.5,
-                            life: rng.gen_range(0.6..1.1),
-                            max: 1.1,
-                            gravity: -1.0,
-                            drag: 1.0,
-                            size: (0.3, 1.0),
-                            pop: 0.2,
-                            spin: Vec3::ZERO,
-                            lands: false,
-                        },
-                    );
-                }
-                flash_light(
-                    &mut commands,
-                    p + d * 2.0,
-                    Color::srgb(1.0, 0.5, 0.15),
-                    250_000.0,
-                    range * 1.5,
-                    0.4,
                 );
             }
             Fx::Zone {
@@ -1359,6 +1487,24 @@ pub fn play(
                     ));
                 }
             }
+            Fx::Blood { pos, dir, headshot } => {
+                blood_splatter(
+                    &mut commands,
+                    a,
+                    Vec3::from_array(pos),
+                    Vec3::from_array(dir),
+                    headshot,
+                    &mut rng,
+                );
+            }
+            Fx::Decapitation { pos } => {
+                decapitation_fountain(
+                    &mut commands,
+                    a,
+                    Vec3::from_array(pos),
+                    &mut rng,
+                );
+            }
         }
     }
 }
@@ -1366,11 +1512,8 @@ pub fn play(
 fn animate(
     mut commands: Commands,
     time: Res<Time>,
-    mut bursts: Query<
-        (Entity, &mut Burst, &mut Transform, Option<&mut PointLight>),
-        Without<Pending>,
-    >,
-    mut spikes: Query<(Entity, &mut Spike, &mut Transform), (Without<Burst>, Without<Pending>)>,
+    mut bursts: Query<(Entity, &mut Burst, &mut Transform, Option<&mut PointLight>)>,
+    mut spikes: Query<(Entity, &mut Spike, &mut Transform), Without<Burst>>,
 ) {
     let dt = time.delta_secs();
     for (e, mut b, mut tf, light) in &mut bursts {
@@ -1380,7 +1523,6 @@ fn animate(
             continue;
         }
         let t = 1.0 - b.life / b.max;
-        let fade = 1.0 - ((t - 0.75) / 0.25).clamp(0.0, 1.0);
         let flat = |tf: &mut Transform, r: f32| {
             let r = r.max(0.001);
             tf.scale = Vec3::new(r, tf.scale.y, r);
@@ -1393,7 +1535,6 @@ fn animate(
             }
             Grow::Ball(r) => tf.scale = Vec3::splat(r * (0.3 + 0.7 * t.sqrt())),
             Grow::Flat(r) => flat(&mut tf, r * t.max(0.05)),
-            Grow::Sheet(r) => flat(&mut tf, r * (t * 8.0).min(1.0) * fade),
             Grow::Hold => {
                 let r = tf.scale.x;
                 if t > 0.75 {
@@ -1447,52 +1588,10 @@ fn bullets(
         let path = b.b - b.a;
         let dist = path.length();
         let dir = path / dist.max(1e-4);
-        let step = if b.spear { SPEAR_SPEED } else { TRACER_SPEED } * time.delta_secs();
+        let step = TRACER_SPEED * time.delta_secs();
         b.travelled += step;
         let arrived = b.travelled >= dist;
         let just_arrived = arrived && b.travelled - step < dist;
-        if b.spear {
-            // The spear flies point first, crackling, and bursts at the end.
-            tf.translation = b.a + dir * b.travelled.min(dist);
-            tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
-            if rng.gen_bool(0.5) {
-                let p = tf.translation;
-                let side = rand_dir(&mut rng) * 0.8;
-                bolt(
-                    &mut commands,
-                    &a,
-                    p - dir * 0.5,
-                    p - dir * 1.5 + side,
-                    0.02,
-                    &mut rng,
-                );
-            }
-            if just_arrived {
-                for _ in 0..3 {
-                    let to = b.b + rand_dir(&mut rng) * 2.5;
-                    bolt(
-                        &mut commands,
-                        &a,
-                        b.b,
-                        to.with_y(to.y.max(0.05)),
-                        0.04,
-                        &mut rng,
-                    );
-                }
-                flash_light(
-                    &mut commands,
-                    b.b,
-                    Color::srgb(0.6, 0.85, 1.0),
-                    80_000.0,
-                    9.0,
-                    0.25,
-                );
-            }
-            if b.travelled > dist + 8.0 {
-                commands.entity(e).despawn();
-            }
-            continue;
-        }
         let head = b.travelled.min(dist);
         let tail = (b.travelled - TRACER_LEN).clamp(0.0, dist);
         if tail >= dist - 1e-3 {
@@ -1547,8 +1646,6 @@ fn bullets(
     }
 }
 
-const SPEAR_SPEED: f32 = 70.0;
-
 /// Shots that hit nothing end at full range: no sparks out there.
 const GUN_RANGE_FX: f32 = crate::weapons::GUN_RANGE - 1.0;
 
@@ -1597,71 +1694,6 @@ fn particles(
         } else {
             tf.scale = Vec3::splat(s);
         }
-    }
-}
-
-/// Orbital strike: the marker spins and tightens, a thin laser points down
-/// from the sky, then the beam and blast hit.
-fn markers(
-    mut commands: Commands,
-    time: Res<Time>,
-    assets: Res<FxAssets>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut pending: Query<(Entity, &mut Pending, &mut Transform), Without<Burst>>,
-    mut lines: ResMut<Lines>,
-    mut ground: ResMut<crate::markers::Markers>,
-) {
-    let dt = time.delta_secs();
-    let t = time.elapsed_secs();
-    let a = &*assets;
-    for (e, mut p, mut tf) in &mut pending {
-        p.delay -= dt;
-        ground.push(
-            crate::markers::Marker::new(
-                p.pos,
-                crate::markers::Shape::Circle { radius: p.radius },
-                crate::markers::PREVIEW,
-            )
-            .fill(1.0 - p.delay / p.total),
-        );
-        let pulse = 1.0 + 0.06 * (t * 14.0).sin();
-        tf.rotation = Quat::from_rotation_y(t * 2.5);
-        tf.scale = Vec3::new(p.radius * pulse, 1.0, p.radius * pulse);
-        lines.0.push((
-            p.pos + Vec3::Y * 0.1,
-            p.pos + Vec3::Y * 60.0,
-            Color::srgb(1.0, 0.25, 0.2),
-            0.0,
-        ));
-        if p.delay > 0.0 {
-            continue;
-        }
-        commands.entity(e).despawn();
-        // Outer glow and white-hot core.
-        burst(
-            &mut commands,
-            &a.beam,
-            a.beam_outer.clone(),
-            Transform::from_translation(p.pos + Vec3::Y * 30.0),
-            0.8,
-            Grow::Column2(p.radius * 0.45),
-        );
-        burst(
-            &mut commands,
-            &a.beam,
-            a.beam_core.clone(),
-            Transform::from_translation(p.pos + Vec3::Y * 30.0),
-            0.6,
-            Grow::Column2(p.radius * 0.18),
-        );
-        explosion(
-            &mut commands,
-            a,
-            &mut materials,
-            p.pos + Vec3::Y * 0.5,
-            p.radius,
-            [1.0, 0.5, 0.15],
-        );
     }
 }
 
