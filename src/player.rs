@@ -232,19 +232,33 @@ fn apply_fov(
     settings: Res<Settings>,
     aim: Res<crate::weapons::Aim>,
     player: Single<(&LocalPlayer, &mut Projection)>,
+    mut fov_vel: Local<f32>,
 ) {
     let (p, mut proj) = player.into_inner();
     if let Projection::Perspective(persp) = &mut *proj {
-        let boost = if p.sprinting || p.sliding > 0.0 || p.dash_time > 0.0 {
-            8.0
+        let boost = if p.sliding > 0.0 || p.dash_time > 0.0 {
+            7.0
+        } else if p.sprinting {
+            4.0
+        } else if p.on_ground && p.ground_time < 0.25 && p.last_air > 0.2 {
+            -3.0
         } else {
             0.0
         };
         let target = (settings.fov + boost).to_radians() * aim.fov_scale();
-        // Smooth exponential FOV transition: fast snappy optical zoom when raising sights,
-        // smooth cinematic ease when lowering or sprinting, with zero pop or hitching.
-        let rate = if aim.amount > 0.0 { 18.0 } else { 12.0 };
-        persp.fov += (target - persp.fov) * (1.0 - (-rate * time.delta_secs()).exp());
+        // Second-order spring damping for responsive, smooth FOV kick
+        let dt = time.delta_secs();
+        let omega = if aim.amount > 0.0 { 24.0 } else { 16.0 };
+        let zeta = 0.85; // slightly underdamped for snappy tactile speed feel
+        let f = 1.0 + 2.0 * dt * zeta * omega;
+        let oo = omega * omega;
+        let hoo = dt * oo;
+        let hhoo = dt * hoo;
+        let det_inv = 1.0 / (f + hhoo);
+        let diff = persp.fov - target;
+        let next_fov = (f * persp.fov + dt * *fov_vel + hhoo * target) * det_inv;
+        *fov_vel = (*fov_vel - hoo * diff) * det_inv;
+        persp.fov = next_fov;
     }
 }
 

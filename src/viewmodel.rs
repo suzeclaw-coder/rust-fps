@@ -84,6 +84,11 @@ pub const STANDARD_RELOAD_EVENTS: [(f32, ReloadSound); 3] = [
     (0.85, ReloadSound::BoltRack),
 ];
 
+pub const TACTICAL_RELOAD_EVENTS: [(f32, ReloadSound); 2] = [
+    (0.35, ReloadSound::MagOut),
+    (0.65, ReloadSound::MagIn),
+];
+
 pub const SHELL_RELOAD_EVENTS: [(f32, ReloadSound); 4] = [
     (0.20, ReloadSound::Shell),
     (0.45, ReloadSound::Shell),
@@ -97,8 +102,10 @@ struct ViewAnim {
     equip: f32,
     last_shots: u32,
     since_shot: f32,
+    consecutive_shots: u32,
     flash_roll: f32,
     sway: Vec2,
+    sway_vel: Vec2,
     bob: f32,
     sprint: f32,
     crouch: f32,
@@ -539,6 +546,7 @@ fn animate(
     mut muzzle: ResMut<ViewMuzzle>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut sounds: ResMut<crate::audio::SoundQueue>,
+    mut fx: ResMut<crate::fx::FxQueue>,
     player: Single<&LocalPlayer>,
     mut parts: ParamSet<(
         Query<(&GunPivot, &mut Transform, &mut Visibility), Without<ViewRoot>>,
@@ -581,10 +589,29 @@ fn animate(
     anim.equip = (anim.equip + dt / 0.35).min(1.0);
     if loadout.shots != anim.last_shots {
         anim.last_shots = loadout.shots;
+        if anim.since_shot < 0.35 {
+            anim.consecutive_shots += 1;
+        } else {
+            anim.consecutive_shots = 1;
+        }
         anim.since_shot = 0.0;
         anim.flash_roll = rand::thread_rng().gen_range(0.0..PI);
+
+        // Muzzle & chamber heat smoke wisps after >5 consecutive rounds or firing shotgun/sniper
+        let is_heavy_heat = matches!(gun, 10 | 11 | 12 | 14 | 15) || anim.consecutive_shots >= 5;
+        if is_heavy_heat {
+            let muzzle_w = player.eye_pos()
+                + Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0)
+                    * Vec3::new(0.12, -0.12, -rig.length.max(0.4) * 0.9);
+            fx.0.push(crate::fx::Fx::HeatSmoke {
+                pos: muzzle_w.to_array(),
+            });
+        }
     } else {
         anim.since_shot += dt;
+        if anim.since_shot > 0.8 {
+            anim.consecutive_shots = 0;
+        }
     }
     let firing = anim.since_shot < 0.3;
     let sprint_target = if player.sprinting && player.on_ground && !firing {
@@ -601,7 +628,20 @@ fn animate(
     anim.crouch = approach(anim.crouch, crouch_target, dt * 8.0);
     let look = -motion.delta * 0.0012;
     let look = look.clamp(Vec2::splat(-0.08), Vec2::splat(0.08));
-    anim.sway = anim.sway.lerp(look, 1.0 - (-dt * 9.0).exp());
+
+    // Second-order harmonic spring oscillator for recoil & sway (f=4.5 Hz, ζ=0.68)
+    // Guns have physical mass: snapping aim quickly causes slight tactile overshoot and elastic settling
+    let omega = 2.0 * std::f32::consts::PI * 4.5;
+    let zeta = 0.68;
+    let f_spring = 1.0 + 2.0 * dt * zeta * omega;
+    let oo = omega * omega;
+    let hoo = dt * oo;
+    let hhoo = dt * hoo;
+    let det_inv = 1.0 / (f_spring + hhoo);
+    let diff = anim.sway - look;
+    let next_sway = (f_spring * anim.sway + dt * anim.sway_vel + hhoo * look) * det_inv;
+    anim.sway_vel = (anim.sway_vel - hoo * diff) * det_inv;
+    anim.sway = next_sway;
     let speed = player.horizontal_speed();
     let amp = if player.on_ground {
         (speed / 6.0).min(1.4)
@@ -712,15 +752,19 @@ fn animate(
     // Regular crouch cant
     rot *= Quat::from_rotation_z(0.12 * anim.crouch * (1.0 - ads) * (1.0 - slide_k));
 
-    // Recoil: snappy attack impulse and elastic snap-back recovery curve
+    // Recoil: snappy attack impulse and second-order damped harmonic recovery curve
     let handling = attach.handling(gun);
     let kick = crate::data::recoil(gun).visual;
     let shot_t = anim.since_shot;
-    let punch = if shot_t < 0.032 {
-        (shot_t / 0.032).powf(0.65)
+    let omega_r = 22.0;
+    let zeta_r = 0.72;
+    let punch = if shot_t < 0.030 {
+        (shot_t / 0.030).powf(0.68)
     } else {
-        let decay_t = shot_t - 0.032;
-        (-16.0 * decay_t).exp() - 0.12 * (-24.0 * decay_t).exp() * (decay_t * 28.0).sin()
+        let dt_decay = shot_t - 0.030;
+        let d = (-zeta_r * omega_r * dt_decay).exp();
+        let osc = (omega_r * (1.0 - zeta_r * zeta_r).sqrt() * dt_decay).cos();
+        d * osc
     };
     let r = (loadout.recoil * 0.55 + punch.max(0.0) * 0.45) * (0.5 + 0.5 * handling.recoil_up);
     let recoil_at = |k: f32| {
@@ -751,6 +795,15 @@ fn animate(
         pos += Vec3::new(0.0015, -0.004, -0.007) * dry_k;
         rot *= Quat::from_euler(EulerRot::YXZ, 0.025 * dry_k, -0.01 * dry_k, -0.035 * dry_k);
     }
+    // Weapon inspect flourish (Action::Inspect)
+    if loadout.inspect > 0.0 {
+        let insp = (1.0 - loadout.inspect / 2.4).clamp(0.0, 1.0);
+        let roll = (insp * std::f32::consts::PI).sin() * 0.52;
+        let yaw = (insp * std::f32::consts::TAU).sin() * -0.22;
+        let pitch = (insp * std::f32::consts::PI).sin() * 0.16;
+        pos += Vec3::new(-0.02, 0.025, 0.035) * (insp * std::f32::consts::PI).sin();
+        rot *= Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+    }
     // Reload: tactile impulses for magazine extraction, insertion slap, and bolt release
     let mut reload_impulse_pos = Vec3::ZERO;
     let mut reload_impulse_rot = Quat::IDENTITY;
@@ -763,6 +816,8 @@ fn animate(
         let is_shell_fed = rig.single_load || matches!(gun, 10 | 11 | 12 | 18);
         let track: &[(f32, ReloadSound)] = if is_shell_fed {
             &SHELL_RELOAD_EVENTS
+        } else if loadout.tactical_reload {
+            &TACTICAL_RELOAD_EVENTS
         } else {
             &STANDARD_RELOAD_EVENTS
         };
@@ -788,8 +843,8 @@ fn animate(
                 reload_impulse_pos += Vec3::new(0.002, 0.011, -0.005) * slap;
                 reload_impulse_rot *= Quat::from_euler(EulerRot::YXZ, -0.015 * slap, 0.015 * slap, 0.035 * slap);
             }
-            // Bolt rack / chambering release (around p = 0.86..0.94)
-            if (0.86..0.94).contains(&p) {
+            // Bolt rack / chambering release (around p = 0.86..0.94) - skipped on tactical reload
+            if !loadout.tactical_reload && (0.86..0.94).contains(&p) {
                 let bolt = ((p - 0.86) / 0.08 * PI).sin();
                 reload_impulse_pos += Vec3::new(0.0, -0.005, -0.010) * bolt;
                 reload_impulse_rot *= Quat::from_rotation_x(-0.035 * bolt);

@@ -611,11 +611,11 @@ fn enemy_colors(
         } else {
             look.1 = (look.1 - 7.0 * dt).max(0.0);
         }
-        let (tint, glow) = if status.stunned {
-            // Frozen stiff (or choking in smoke): pale and glowing.
+        let (tint, glow) = if status.stunned || status.slowed {
+            // Frost: White crystalline frostbite dusting on material albedo with glacial cyan glow
             (
-                Color::srgb(0.75, 0.9, 1.0),
-                LinearRgba::rgb(0.12, 0.25, 0.45),
+                Color::srgb(0.92, 0.96, 1.05),
+                LinearRgba::rgb(0.20, 0.45, 0.75),
             )
         } else if status.marked {
             // Hunter's Mark: a pulsing red glow.
@@ -625,20 +625,17 @@ fn enemy_colors(
                 LinearRgba::rgb(0.7, 0.04, 0.02) * pulse,
             )
         } else if status.poisoned {
+            // Poison/Acid: necrotic toxic green skin tint with corrosive glow
             (
-                Color::srgb(0.65, 0.95, 0.4),
-                LinearRgba::rgb(0.12, 0.35, 0.02),
+                Color::srgb(0.32, 0.65, 0.22),
+                LinearRgba::rgb(0.22, 0.80, 0.12),
             )
         } else if status.burning {
+            // Ignited: skin tinted charcoal / ember red with pulsing fiery ember glow
             let flicker = 0.6 + 0.4 * (time.elapsed_secs() * 12.0).sin().abs();
             (
-                Color::srgb(1.0, 0.75, 0.6),
-                LinearRgba::rgb(0.5, 0.15, 0.02) * flicker,
-            )
-        } else if status.slowed {
-            (
-                Color::srgb(0.6, 0.85, 1.0),
-                LinearRgba::rgb(0.02, 0.08, 0.18),
+                Color::srgb(0.24, 0.12, 0.10),
+                LinearRgba::rgb(1.6, 0.45, 0.08) * flicker,
             )
         } else {
             (look.2, look.3)

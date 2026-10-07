@@ -82,9 +82,14 @@ pub struct LowHealthFx {
 #[derive(Component)]
 pub struct LowHealthVignette;
 
+/// Subtle radial chromatic fringe overlay during high-momentum moments (slide, dash, landing).
+#[derive(Component)]
+pub struct MomentumFringeVignette;
+
 #[derive(Resource)]
 pub struct VignetteAssets {
     pub image: Handle<Image>,
+    pub fringe_image: Handle<Image>,
 }
 
 /// How far the camera moves at full shake (it goes with the square, so
@@ -108,6 +113,7 @@ impl Plugin for FeelPlugin {
                     update_hit_stop,
                     shake_sources.before(crate::fx::play),
                     update_low_health,
+                    update_momentum_fringe,
                     drift,
                     warm_up.before(crate::fx::play),
                 )
@@ -119,6 +125,7 @@ impl Plugin for FeelPlugin {
                 (
                     spawn_motes.after(crate::game::start_match),
                     spawn_low_health_vignette,
+                    spawn_momentum_fringe_vignette,
                     start_warm_up,
                 ),
             )
@@ -179,9 +186,42 @@ fn create_vignette_image() -> Image {
     )
 }
 
+/// Creates a subtle radial chromatic fringe vignette texture for peripheral lens distortion.
+fn create_chromatic_fringe_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: u32 = 128;
+    let mut data = Vec::with_capacity((N * N * 4) as usize);
+    for y in 0..N {
+        for x in 0..N {
+            let u = (x as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+            let d = (u * u * 0.82 + v * v).sqrt();
+            let t = ((d - 0.85) / 0.35).clamp(0.0, 1.0);
+            let alpha = t * t * (3.0 - 2.0 * t);
+            let r = 255;
+            let g = (140.0 * (1.0 - t)) as u8;
+            let b = 255;
+            data.extend_from_slice(&[r, g, b, (alpha * 255.0) as u8]);
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 fn setup_vignette_assets(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let image = images.add(create_vignette_image());
-    commands.insert_resource(VignetteAssets { image });
+    let fringe_image = images.add(create_chromatic_fringe_image());
+    commands.insert_resource(VignetteAssets { image, fringe_image });
 }
 
 fn spawn_low_health_vignette(mut commands: Commands, assets: Res<VignetteAssets>) {
@@ -198,6 +238,54 @@ fn spawn_low_health_vignette(mut commands: Commands, assets: Res<VignetteAssets>
         Pickable::IGNORE,
         GlobalZIndex(-4),
     ));
+}
+
+fn spawn_momentum_fringe_vignette(mut commands: Commands, assets: Res<VignetteAssets>) {
+    commands.spawn((
+        InGameEntity,
+        MomentumFringeVignette,
+        ImageNode::new(assets.fringe_image.clone()).with_color(Color::NONE),
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        Pickable::IGNORE,
+        GlobalZIndex(-3),
+    ));
+}
+
+/// Dynamic chromatic aberration and lens fringe during high momentum (sliding, dashing, heavy landing).
+fn update_momentum_fringe(
+    time: Res<Time>,
+    player: Query<&LocalPlayer>,
+    mut fringe: Query<&mut ImageNode, With<MomentumFringeVignette>>,
+    mut current_strength: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    let target = player.iter().next().map_or(0.0, |p| {
+        let mut momentum = 0.0f32;
+        if p.sliding > 0.0 {
+            momentum = momentum.max((p.sliding / 0.6).min(1.0));
+        }
+        if p.dash_time > 0.0 {
+            momentum = momentum.max(1.0);
+        }
+        if p.on_ground && p.ground_time < 0.22 && p.last_air > 0.22 {
+            momentum = momentum.max(0.75);
+        }
+        momentum.clamp(0.0, 1.0)
+    });
+    *current_strength += (target - *current_strength) * (1.0 - (-14.0 * dt).exp());
+    for mut node in &mut fringe {
+        if *current_strength > 0.005 {
+            let alpha = (*current_strength * 0.45).clamp(0.0, 0.65);
+            node.color = Color::srgba(0.9, 0.35, 1.0, alpha);
+        } else {
+            node.color = Color::NONE;
+        }
+    }
 }
 
 /// Updates low health heartbeat and arterial screen darkening vignette when health < 30%.

@@ -32,6 +32,7 @@ pub struct AudioPlugin;
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SoundQueue>()
+            .init_resource::<TinnitusState>()
             .add_systems(PreStartup, build_bank)
             .add_systems(
                 Update,
@@ -45,6 +46,7 @@ impl Plugin for AudioPlugin {
                         tension_sounds,
                         ambient_sounds,
                         combat_feedback_sounds,
+                        update_tinnitus,
                     )
                         .in_set(Phase::Present)
                         .run_if(in_state(AppState::InGame)),
@@ -52,6 +54,27 @@ impl Plugin for AudioPlugin {
                 ),
             )
             .add_systems(PostUpdate, play_queue);
+    }
+}
+
+/// Near-death auditory tunneling / tinnitus state.
+#[derive(Resource, Default)]
+pub struct TinnitusState {
+    pub timer: f32,
+}
+
+impl TinnitusState {
+    pub fn trigger(&mut self) {
+        self.timer = 2.5;
+    }
+    pub fn is_active(&self) -> bool {
+        self.timer > 0.0
+    }
+}
+
+fn update_tinnitus(time: Res<Time>, mut tinnitus: ResMut<TinnitusState>) {
+    if tinnitus.timer > 0.0 {
+        tinnitus.timer = (tinnitus.timer - time.delta_secs()).max(0.0);
     }
 }
 
@@ -86,6 +109,9 @@ pub enum Snd {
     Swap,
     Step,
     StepSoft,
+    StepMetal,
+    StepPuddle,
+    Tinnitus,
     Jump,
     Land,
     Slide,
@@ -156,10 +182,12 @@ impl Snd {
             | Bolt | Shell | Swap | HitTick | HitHead | Kill | MeleeSwing | MeleeHit => Group::Guns,
             Groan | BruteRoar | ShooterHiss | CrawlerRasp | ZombieAttack | ZombieHurt
             | ZombieDeath | Spit => Group::Enemies,
-            Step | StepSoft | Jump | Land | Slide | PlayerHurt | Heartbeat => Group::Movement,
+            Step | StepSoft | StepMetal | StepPuddle | Jump | Land | Slide | PlayerHurt | Heartbeat => {
+                Group::Movement
+            }
             Explosion | BigExplosion | Slam | Fire | Ice | Heal | Zap | Slash | Whoosh | Orbital
             | BladeStorm | Throw | Chain | Twang | Snap | Shatter | Hiss | Wail | Warcry
-            | Ambience => Group::Effects,
+            | Ambience | Tinnitus => Group::Effects,
             _ => Group::Interface,
         }
     }
@@ -176,7 +204,8 @@ impl Snd {
             Groan | ShooterHiss | CrawlerRasp => (0.35, 8.0),
             BruteRoar => (0.6, 18.0),
             ZombieAttack | ZombieHurt | ZombieDeath | Spit => (0.5, 10.0),
-            Step | StepSoft => (0.35, 6.0),
+            Step | StepSoft | StepMetal | StepPuddle => (0.35, 6.0),
+            Tinnitus => (0.85, 100.0),
             Door => (0.8, 20.0),
             BoxJingle | BoxReady | BoxFly => (0.6, 14.0),
             HitHead => (0.8, 100.0),
@@ -233,7 +262,11 @@ impl SoundQueue {
 }
 
 #[derive(Resource)]
-struct Bank(HashMap<Snd, Vec<Handle<AudioSource>>>);
+struct Bank {
+    outdoor: HashMap<Snd, Vec<Handle<AudioSource>>>,
+    indoor: HashMap<Snd, Vec<Handle<AudioSource>>>,
+    muffled: HashMap<Snd, Vec<Handle<AudioSource>>>,
+}
 
 /// The gun sound for a gun, depending on its class (and a suppressor).
 pub fn shot_sound(gun: u8, suppressed: bool) -> Snd {
@@ -256,8 +289,8 @@ pub fn shot_sound(gun: u8, suppressed: bool) -> Snd {
 
 fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
     use Snd::*;
-    let mut bank: HashMap<Snd, Vec<Buf>> = HashMap::new();
-    let mut add = |s: Snd, b: Buf| bank.entry(s).or_default().push(b);
+    let mut out_bank: HashMap<Snd, Vec<Buf>> = HashMap::new();
+    let mut ind_bank: HashMap<Snd, Vec<Buf>> = HashMap::new();
     let shot = |body, tail, bright, echo| ShotRecipe {
         body,
         tail,
@@ -266,21 +299,48 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     };
     for i in 0..3 {
         let seed = 100 + i * 17;
-        add(ShotPistol, pistol_shot(seed));
-        add(ShotMagnum, magnum_shot(seed + 1));
-        add(ShotSmg, smg_shot(seed + 2));
-        add(ShotRifle, rifle_shot(seed + 3));
-        add(ShotShotgun, shotgun_shot(seed + 4));
-        add(ShotLmg, lmg_shot(seed + 5));
-        add(ShotSniper, sniper_shot(seed + 6));
-        add(ShotSuppressed, suppressed(160.0, seed + 7));
-        add(
-            ShotTurret,
-            gunshot(&shot(260.0, 0.035, 6500.0, 0.15), seed + 8),
+        out_bank.entry(ShotPistol).or_default().push(pistol_shot_reverb(seed, false));
+        ind_bank.entry(ShotPistol).or_default().push(pistol_shot_reverb(seed, true));
+
+        out_bank.entry(ShotMagnum).or_default().push(magnum_shot_reverb(seed + 1, false));
+        ind_bank.entry(ShotMagnum).or_default().push(magnum_shot_reverb(seed + 1, true));
+
+        out_bank.entry(ShotSmg).or_default().push(smg_shot_reverb(seed + 2, false));
+        ind_bank.entry(ShotSmg).or_default().push(smg_shot_reverb(seed + 2, true));
+
+        out_bank.entry(ShotRifle).or_default().push(rifle_shot_reverb(seed + 3, false));
+        ind_bank.entry(ShotRifle).or_default().push(rifle_shot_reverb(seed + 3, true));
+
+        out_bank.entry(ShotShotgun).or_default().push(shotgun_shot_reverb(seed + 4, false));
+        ind_bank.entry(ShotShotgun).or_default().push(shotgun_shot_reverb(seed + 4, true));
+
+        out_bank.entry(ShotLmg).or_default().push(lmg_shot_reverb(seed + 5, false));
+        ind_bank.entry(ShotLmg).or_default().push(lmg_shot_reverb(seed + 5, true));
+
+        out_bank.entry(ShotSniper).or_default().push(sniper_shot_reverb(seed + 6, false));
+        ind_bank.entry(ShotSniper).or_default().push(sniper_shot_reverb(seed + 6, true));
+
+        out_bank.entry(ShotSuppressed).or_default().push(suppressed_reverb(160.0, seed + 7, false));
+        ind_bank.entry(ShotSuppressed).or_default().push(suppressed_reverb(160.0, seed + 7, true));
+
+        out_bank.entry(ShotTurret).or_default().push(
+            gunshot_reverb(&shot(260.0, 0.035, 6500.0, 0.15), seed + 8, false),
         );
-        add(ShotRay, laser(seed + 9));
-        add(ShotThunder, thunder(seed + 10));
+        ind_bank.entry(ShotTurret).or_default().push(
+            gunshot_reverb(&shot(260.0, 0.035, 6500.0, 0.15), seed + 8, true),
+        );
+
+        out_bank.entry(ShotRay).or_default().push(laser_reverb(seed + 9, false));
+        ind_bank.entry(ShotRay).or_default().push(laser_reverb(seed + 9, true));
+
+        out_bank.entry(ShotThunder).or_default().push(thunder_reverb(seed + 10, false));
+        ind_bank.entry(ShotThunder).or_default().push(thunder_reverb(seed + 10, true));
     }
+
+    let mut add = |s: Snd, b: Buf| {
+        out_bank.entry(s).or_default().push(b.clone());
+        ind_bank.entry(s).or_default().push(b);
+    };
     add(DryFire, click(2800.0, 5, 0.06));
     for i in 0..2 {
         add(MagOut, mag_out(200 + i));
@@ -295,9 +355,12 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
             .normalize(0.5),
     );
     for i in 0..5 {
-        add(Step, step(300 + i, false));
-        add(StepSoft, step(320 + i, true));
+        add(Step, step_surface(300 + i, Surface::Concrete));
+        add(StepSoft, step_surface(320 + i, Surface::Grass));
+        add(StepMetal, step_surface(340 + i, Surface::Metal));
+        add(StepPuddle, step_surface(360 + i, Surface::Puddle));
     }
+    add(Tinnitus, tinnitus());
     add(
         Jump,
         whoosh(0.2, 300.0, 900.0, 11)
@@ -639,21 +702,45 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
             .normalize(0.85),
     );
 
-    let bank = bank
+    let to_handles = |map: HashMap<Snd, Vec<Buf>>, sources: &mut ResMut<Assets<AudioSource>>| {
+        map.into_iter()
+            .map(|(s, bufs)| {
+                let handles = bufs
+                    .into_iter()
+                    .map(|b| {
+                        sources.add(AudioSource {
+                            bytes: Arc::from(b.wav()),
+                        })
+                    })
+                    .collect();
+                (s, handles)
+            })
+            .collect()
+    };
+
+    let outdoor = to_handles(out_bank.clone(), &mut sources);
+    let indoor = to_handles(ind_bank, &mut sources);
+    let muffled = out_bank
         .into_iter()
         .map(|(s, bufs)| {
             let handles = bufs
                 .into_iter()
                 .map(|b| {
+                    let buf = if s == Tinnitus { b } else { b.low_pass(450.0) };
                     sources.add(AudioSource {
-                        bytes: Arc::from(b.wav()),
+                        bytes: Arc::from(buf.wav()),
                     })
                 })
                 .collect();
             (s, handles)
         })
         .collect();
-    commands.insert_resource(Bank(bank));
+
+    commands.insert_resource(Bank {
+        outdoor,
+        indoor,
+        muffled,
+    });
 }
 
 #[derive(Component)]
@@ -665,6 +752,8 @@ fn play_queue(
     mut queue: ResMut<SoundQueue>,
     bank: Option<Res<Bank>>,
     settings: Res<Settings>,
+    map: Option<Res<crate::maps::CurrentMap>>,
+    tinnitus: Option<Res<TinnitusState>>,
     listener: Query<&GlobalTransform, With<LocalPlayer>>,
     playing: Query<(), With<Voice3d>>,
 ) {
@@ -673,6 +762,7 @@ fn play_queue(
         .iter()
         .next()
         .map_or(Vec3::ZERO, |g| g.translation());
+    let is_tinnitus = tinnitus.as_ref().map_or(false, |t| t.is_active());
     let mut active = playing.iter().count();
     let mut this_frame: HashMap<Snd, u32> = HashMap::new();
     let mut rng = rand::thread_rng();
@@ -689,7 +779,10 @@ fn play_queue(
             let d = p.distance(ear);
             1.0 / (1.0 + (d / reach).powi(2))
         });
-        let vol = settings.volume / 100.0 * group / 100.0 * base * req.gain * falloff;
+        let mut vol = settings.volume / 100.0 * group / 100.0 * base * req.gain * falloff;
+        if is_tinnitus && req.snd != Snd::Tinnitus {
+            vol *= 0.7;
+        }
         if vol < 0.01 {
             continue;
         }
@@ -699,7 +792,15 @@ fn play_queue(
         if *n > 3 || active > 48 {
             continue;
         }
-        let Some(list) = bank.0.get(&req.snd) else {
+        let is_indoor = map.as_ref().map_or(false, |m| m.0.is_indoor(req.pos.unwrap_or(ear)));
+        let list = if is_tinnitus && req.snd != Snd::Tinnitus {
+            bank.muffled.get(&req.snd)
+        } else if is_indoor {
+            bank.indoor.get(&req.snd).or_else(|| bank.outdoor.get(&req.snd))
+        } else {
+            bank.outdoor.get(&req.snd)
+        };
+        let Some(list) = list else {
             continue;
         };
         let handle = list[rng.gen_range(0..list.len())].clone();
@@ -734,9 +835,15 @@ fn fx_sounds(
     queue: Res<FxQueue>,
     session: Res<Session>,
     roster: Res<Roster>,
+    listener: Query<&GlobalTransform, With<LocalPlayer>>,
     mut sounds: ResMut<SoundQueue>,
+    mut tinnitus: ResMut<TinnitusState>,
     mut seen: Local<Vec<u8>>,
 ) {
+    let ear = listener
+        .iter()
+        .next()
+        .map_or(Vec3::ZERO, |g| g.translation());
     seen.clear();
     for fx in &queue.0 {
         match *fx {
@@ -757,14 +864,21 @@ fn fx_sounds(
                 };
                 sounds.at(snd, Vec3::from_array(a));
             }
-            Fx::Explosion { pos, radius, .. } => sounds.at(
-                if radius > 7.0 {
-                    Snd::BigExplosion
-                } else {
-                    Snd::Explosion
-                },
-                Vec3::from_array(pos),
-            ),
+            Fx::Explosion { pos, radius, .. } => {
+                let p = Vec3::from_array(pos);
+                if p.distance(ear) < 3.5 {
+                    tinnitus.trigger();
+                    sounds.here(Snd::Tinnitus);
+                }
+                sounds.at(
+                    if radius > 7.0 {
+                        Snd::BigExplosion
+                    } else {
+                        Snd::Explosion
+                    },
+                    p,
+                );
+            }
             Fx::Slam { pos, .. } => sounds.at(Snd::Slam, Vec3::from_array(pos)),
             Fx::Heal { pos, .. } => sounds.at(Snd::Heal, Vec3::from_array(pos)),
             Fx::Dash { a, .. } => sounds.at(Snd::Whoosh, Vec3::from_array(a)),
@@ -912,13 +1026,22 @@ fn movement_sounds(
     map: Option<Res<crate::maps::CurrentMap>>,
     player: Single<&LocalPlayer>,
     mut sounds: ResMut<SoundQueue>,
-    mut me: Local<(f32, bool, f32, bool, f32)>,
+    mut fx: ResMut<FxQueue>,
+    mut me: Local<(f32, bool, f32, bool, f32, u8)>,
     mut others: Local<HashMap<u8, (Vec3, f32)>>,
 ) {
-    let soft = map.is_some_and(|m| m.0.ground_kind == crate::maps::Ground::Grass);
-    let step = if soft { Snd::StepSoft } else { Snd::Step };
     let p = *player;
-    let (walked, grounded, air, sliding, hurt) = &mut *me;
+    let surface = map.as_ref().map_or(Surface::Concrete, |m| m.0.surface_at(p.feet));
+    let step = match surface {
+        Surface::Concrete => Snd::Step,
+        Surface::Grass => Snd::StepSoft,
+        Surface::Metal => Snd::StepMetal,
+        Surface::Puddle => Snd::StepPuddle,
+    };
+    let (walked, grounded, air, sliding, hurt, wet_steps) = &mut *me;
+    if surface == Surface::Puddle {
+        *wet_steps = 4;
+    }
     let dt = time.delta_secs();
     if p.on_ground && p.sliding <= 0.0 {
         *walked += p.horizontal_speed() * dt;
@@ -933,6 +1056,15 @@ fn movement_sounds(
             *walked = 0.0;
             let gain = if p.crouching { 0.4 } else { 1.0 };
             sounds.push(step, None, gain, 1.0);
+
+            if *wet_steps > 0 {
+                *wet_steps -= 1;
+                fx.0.push(Fx::Footprint {
+                    pos: p.feet.to_array(),
+                    yaw: p.yaw,
+                    blood: false,
+                });
+            }
         }
     }
     if !p.on_ground {
@@ -976,7 +1108,21 @@ fn movement_sounds(
         entry.0 = feet;
         if entry.1 > 2.2 {
             entry.1 = 0.0;
-            sounds.at(step, feet);
+            let team_surface = map.as_ref().map_or(Surface::Concrete, |m| m.0.surface_at(feet));
+            let team_step = match team_surface {
+                Surface::Concrete => Snd::Step,
+                Surface::Grass => Snd::StepSoft,
+                Surface::Metal => Snd::StepMetal,
+                Surface::Puddle => Snd::StepPuddle,
+            };
+            sounds.at(team_step, feet);
+            if team_surface == Surface::Puddle {
+                fx.0.push(Fx::Footprint {
+                    pos: feet.to_array(),
+                    yaw: info.yaw,
+                    blood: false,
+                });
+            }
         }
     }
 }
@@ -1149,16 +1295,28 @@ fn ui_sounds(
 }
 
 /// Low-health tension audio: plays a pulsing visceral heartbeat when health is < 30%,
-/// accelerating as the player nears death.
+/// and triggers auditory tunneling tinnitus when health drops below 20%.
 fn tension_sounds(
     time: Res<Time>,
     session: Res<Session>,
     roster: Res<Roster>,
     mut sounds: ResMut<SoundQueue>,
+    mut tinnitus: ResMut<TinnitusState>,
     mut timer: Local<f32>,
+    mut prev_health: Local<f32>,
 ) {
     let Some(me) = roster.me(&session) else { return };
     let max = me.max_health();
+
+    // Near-death tinnitus trigger when dropping below 20% max health
+    if me.alive && me.health > 0.0 && me.health < max * 0.20 {
+        if *prev_health >= max * 0.20 || *prev_health == 0.0 {
+            tinnitus.trigger();
+            sounds.here(Snd::Tinnitus);
+        }
+    }
+    *prev_health = me.health;
+
     if me.alive && me.health > 0.0 && me.health < max * 0.3 {
         // hp_ratio: 0.0 at 0 HP, 1.0 at 30% HP
         let hp_ratio = (me.health / (max * 0.3)).clamp(0.0, 1.0);

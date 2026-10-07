@@ -41,6 +41,7 @@ impl Plugin for FxPlugin {
                     particles,
                     debris::update_debris,
                     casings::update_shell_casings,
+                    elemental_status_particles,
                     spells::fall,
                     spells::warns,
                     spells::twirls,
@@ -155,6 +156,16 @@ pub enum Fx {
         pos: [f32; 3],
         count: u32,
     },
+    /// Fading footprint decal on wet or blood-soaked stride.
+    Footprint {
+        pos: [f32; 3],
+        yaw: f32,
+        blood: bool,
+    },
+    /// Wisps of heat smoke from muzzle or ejection port after heavy sustained firing.
+    HeatSmoke {
+        pos: [f32; 3],
+    },
 }
 
 /// Effects to show on this machine this frame.
@@ -197,6 +208,8 @@ pub struct FxAssets {
     bone: Handle<StandardMaterial>,
     casing_mesh: Handle<Mesh>,
     casing_mat: Handle<StandardMaterial>,
+    blood_footprint: Handle<StandardMaterial>,
+    wet_footprint: Handle<StandardMaterial>,
 }
 
 /// A jagged lightning bolt from `from` to `to`, made of glowing segments.
@@ -463,6 +476,20 @@ fn setup(
         }),
         casing_mesh: meshes.add(casings::casing_mesh()),
         casing_mat: materials.add(casings::casing_material()),
+        blood_footprint: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.38, 0.02, 0.02, 0.65),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.35,
+            reflectance: 0.75,
+            ..default()
+        }),
+        wet_footprint: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.06, 0.08, 0.10, 0.45),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.06,
+            reflectance: 0.9,
+            ..default()
+        }),
     };
     commands.insert_resource(assets);
 }
@@ -1098,6 +1125,14 @@ pub fn play(
                     Transform::from_translation(from).with_scale(Vec3::ZERO),
                     NotShadowCaster,
                 ));
+                flash_light(
+                    &mut commands,
+                    from,
+                    Color::srgb(1.0, 0.85, 0.55),
+                    90_000.0,
+                    14.0,
+                    0.04,
+                );
                 let shot_dir = (to - from).normalize_or(Vec3::Z);
                 if !casing_origins.iter().any(|&prev| prev.distance_squared(from) < 0.04 * 0.04) {
                     casing_origins.push(from);
@@ -1541,6 +1576,42 @@ pub fn play(
                     );
                 }
             }
+            Fx::Footprint { pos, yaw, blood } => {
+                let p = Vec3::from_array(pos);
+                burst(
+                    &mut commands,
+                    &a.disc,
+                    if blood { a.blood_footprint.clone() } else { a.wet_footprint.clone() },
+                    Transform::from_translation(p + Vec3::Y * 0.015)
+                        .with_rotation(Quat::from_rotation_y(yaw))
+                        .with_scale(Vec3::new(0.12, 1.0, 0.22)),
+                    4.5,
+                    Grow::Hold,
+                );
+            }
+            Fx::HeatSmoke { pos } => {
+                let p = Vec3::from_array(pos);
+                for _ in 0..3 {
+                    let dir = rand_dir(&mut rng);
+                    particle(
+                        &mut commands,
+                        &a.ball,
+                        &a.smoke,
+                        p + dir * 0.04,
+                        Particle {
+                            vel: Vec3::new(dir.x * 0.08, rng.gen_range(0.25..0.55), dir.z * 0.08),
+                            life: 0.9,
+                            max: 0.9,
+                            gravity: -0.15,
+                            drag: 0.7,
+                            size: (0.03, 0.16),
+                            pop: 0.2,
+                            spin: dir * 2.0,
+                            lands: false,
+                        },
+                    );
+                }
+            }
         }
     }
 }
@@ -1951,4 +2022,107 @@ fn clear(mut lines: ResMut<Lines>, mut queue: ResMut<FxQueue>, mut out: ResMut<F
 pub fn emit(queue: &mut FxQueue, out: &mut FxOutbox, fx: Fx) {
     queue.0.push(fx.clone());
     out.0.push(fx);
+}
+
+fn elemental_status_particles(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Option<Res<FxAssets>>,
+    enemies: Query<(&Transform, &crate::EnemyStatus), With<crate::Enemy>>,
+    mut timer: Local<f32>,
+) {
+    let Some(a) = assets else { return };
+    *timer += time.delta_secs();
+    if *timer < 0.08 {
+        return;
+    }
+    *timer = 0.0;
+
+    let mut rng = rand::thread_rng();
+    for (tf, status) in &enemies {
+        let pos = tf.translation;
+        if status.burning {
+            // Fiery ember particles shedding off burning zombies
+            let off = Vec3::new(
+                rng.gen_range(-0.3..0.3),
+                rng.gen_range(0.2..1.6),
+                rng.gen_range(-0.3..0.3),
+            );
+            particle(
+                &mut commands,
+                &a.cube,
+                &a.fire,
+                pos + off,
+                Particle {
+                    vel: Vec3::new(
+                        rng.gen_range(-0.2..0.2),
+                        rng.gen_range(1.2..2.4),
+                        rng.gen_range(-0.2..0.2),
+                    ),
+                    life: 0.45,
+                    max: 0.45,
+                    gravity: -0.5,
+                    drag: 0.8,
+                    size: (0.05, 0.01),
+                    pop: 0.1,
+                    spin: rand_dir(&mut rng) * 8.0,
+                    lands: false,
+                },
+            );
+        }
+        if status.poisoned {
+            // Toxic green fume wisps & corrosive dripping particles
+            let off = Vec3::new(
+                rng.gen_range(-0.25..0.25),
+                rng.gen_range(0.3..1.5),
+                rng.gen_range(-0.25..0.25),
+            );
+            particle(
+                &mut commands,
+                &a.ball,
+                &a.heal,
+                pos + off,
+                Particle {
+                    vel: Vec3::new(
+                        rng.gen_range(-0.1..0.1),
+                        rng.gen_range(-0.6..0.5),
+                        rng.gen_range(-0.1..0.1),
+                    ),
+                    life: 0.5,
+                    max: 0.5,
+                    gravity: 0.8,
+                    drag: 0.9,
+                    size: (0.04, 0.08),
+                    pop: 0.2,
+                    spin: Vec3::ZERO,
+                    lands: false,
+                },
+            );
+        }
+        if status.slowed || status.stunned {
+            // White crystalline frostbite flakes shedding
+            let off = Vec3::new(
+                rng.gen_range(-0.3..0.3),
+                rng.gen_range(0.4..1.7),
+                rng.gen_range(-0.3..0.3),
+            );
+            particle(
+                &mut commands,
+                &a.cube,
+                &a.ghost_mat,
+                pos + off,
+                Particle {
+                    vel: Vec3::new(rng.gen_range(-0.1..0.1), -0.4, rng.gen_range(-0.1..0.1)),
+                    life: 0.6,
+                    max: 0.6,
+                    gravity: 0.2,
+                    drag: 0.95,
+                    size: (0.035, 0.01),
+                    pop: 0.1,
+                    spin: rand_dir(&mut rng) * 4.0,
+                    lands: false,
+                },
+            );
+        }
+    }
 }

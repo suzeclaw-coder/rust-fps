@@ -98,6 +98,7 @@ pub struct MapLayout {
     pub extraction: Vec3,
     pub doors: Vec<DoorDef>,
     pub wall_buys: Vec<WallBuy>,
+    pub indoor_areas: Vec<[f32; 4]>,
 }
 
 impl MapLayout {
@@ -120,7 +121,48 @@ impl MapLayout {
             extraction: Vec3::ZERO,
             doors: Vec::new(),
             wall_buys: Vec::new(),
+            indoor_areas: Vec::new(),
         }
+    }
+
+    /// Tests if a 3D position is inside any enclosed roofed building or room.
+    pub fn is_indoor(&self, pos: Vec3) -> bool {
+        self.indoor_areas.iter().any(|&[x0, z0, x1, z1]| {
+            pos.x >= x0 && pos.x <= x1 && pos.z >= z0 && pos.z <= z1
+        })
+    }
+
+    /// Evaluates the ground material at a given position for footstep acoustics.
+    pub fn surface_at(&self, pos: Vec3) -> crate::audio::synth::Surface {
+        // 1. Puddle detection (reflective puddle quads on asphalt)
+        if self.ground_kind == Ground::Asphalt {
+            const PUDDLE_SPOTS: [Vec3; 6] = [
+                Vec3::new(4.0, 0.02, -6.0),
+                Vec3::new(-12.0, 0.02, 14.0),
+                Vec3::new(18.0, 0.02, 8.0),
+                Vec3::new(-8.0, 0.02, -18.0),
+                Vec3::new(22.0, 0.02, -14.0),
+                Vec3::new(-20.0, 0.02, 2.0),
+            ];
+            for spot in &PUDDLE_SPOTS {
+                if pos.with_y(0.0).distance(spot.with_y(0.0)) < 3.2 {
+                    return crate::audio::synth::Surface::Puddle;
+                }
+            }
+        }
+
+        // 2. Metal surfaces: elevated metal catwalks/stairs/containers (pos.y > 0.8)
+        if pos.y > 0.8 {
+            return crate::audio::synth::Surface::Metal;
+        }
+
+        // 3. Grass/dirt: outdoor grass map
+        if self.ground_kind == Ground::Grass && !self.is_indoor(pos) {
+            return crate::audio::synth::Surface::Grass;
+        }
+
+        // 4. Default: Concrete/stone
+        crate::audio::synth::Surface::Concrete
     }
 
     /// Enemy spawn points in area `zone`.
@@ -1986,6 +2028,13 @@ pub fn spawn_map(
         })),
     ));
 
+    let grime_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.08, 0.08, 0.07, 0.85),
+        perceptual_roughness: 0.98,
+        reflectance: 0.1,
+        ..default()
+    });
+
     for s in &layout.solids {
         let mut e = commands.spawn((
             InGameEntity,
@@ -2001,16 +2050,70 @@ pub fn spawn_map(
                     ..default()
                 })),
             ));
+            // Edge-wear / grime skirt at the base of significant walls touching the ground
+            if (s.pos.y - s.size.y / 2.0).abs() < 0.15 && (s.size.x > 1.2 || s.size.z > 1.2) && s.size.y > 1.0 {
+                commands.spawn((
+                    InGameEntity,
+                    Mesh3d(meshes.add(Cuboid::new(s.size.x + 0.08, 0.12, s.size.z + 0.08))),
+                    MeshMaterial3d(grime_mat.clone()),
+                    Transform::from_xyz(s.pos.x, 0.06, s.pos.z),
+                    bevy::pbr::NotShadowCaster,
+                ));
+            }
         }
     }
+
+    // Reflective planar puddles on asphalt / street surfaces
+    if layout.ground_kind == Ground::Asphalt {
+        let puddle_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.05, 0.07, 0.09, 0.9),
+            perceptual_roughness: 0.04,
+            reflectance: 0.95,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        });
+        let puddle_spots = [
+            Vec3::new(4.0, 0.02, -6.0),
+            Vec3::new(-12.0, 0.02, 14.0),
+            Vec3::new(18.0, 0.02, 8.0),
+            Vec3::new(-8.0, 0.02, -18.0),
+            Vec3::new(22.0, 0.02, -14.0),
+            Vec3::new(-20.0, 0.02, 2.0),
+        ];
+        for (i, spot) in puddle_spots.iter().enumerate() {
+            let sx = 3.5 + (i as f32 * 1.7).sin().abs() * 2.5;
+            let sz = 2.8 + (i as f32 * 2.3).cos().abs() * 2.0;
+            let rot = Quat::from_rotation_y(i as f32 * 0.8);
+            commands.spawn((
+                InGameEntity,
+                Mesh3d(meshes.add(Plane3d::default().mesh().size(sx, sz).build())),
+                MeshMaterial3d(puddle_mat.clone()),
+                Transform::from_translation(*spot).with_rotation(rot),
+                bevy::pbr::NotShadowCaster,
+            ));
+        }
+    }
+
     let art = std::mem::take(&mut layout.art);
     art_meshes(commands, meshes, &mats, art, None, |_, _| {});
     let props = std::mem::take(&mut layout.prop_art);
     art_meshes(commands, meshes, &mats, props, None, outline_solid);
+
+    // Faux volumetric god ray light shaft material
+    let god_ray_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.9, 0.92, 1.0, if night { 0.06 } else { 0.04 }),
+        alpha_mode: AlphaMode::Add,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let ray_mesh = meshes.add(Cylinder::new(1.4, 6.0));
+
     // At night the lamps do the work: brighter and reaching further.
     let (lamp, reach) = if night { (3.0, 24.0) } else { (1.0, 18.0) };
-    for (pos, color, intensity) in &layout.lights {
-        commands.spawn((
+    for (i, (pos, color, intensity)) in layout.lights.iter().enumerate() {
+        let mut e = commands.spawn((
             InGameEntity,
             PointLight {
                 intensity: *intensity * lamp,
@@ -2021,6 +2124,29 @@ pub fn spawn_map(
             },
             Transform::from_translation(*pos),
         ));
+        // Micro-flicker for organic streetlamp and fire ambience (subset of lights to minimize GPU buffer churn)
+        if i % 3 == 0 {
+            let phase = i as f32 * 1.618;
+            e.insert(crate::graphics::FlickerLight {
+                base: *intensity * lamp,
+                speed: 7.0 + (i as f32 * 1.3).fract() * 5.0,
+                amplitude: if night { 0.16 } else { 0.08 },
+                phase,
+            });
+        }
+
+        // Faux volumetric god ray cone under elevated key lights
+        if pos.y >= 3.8 && i % 3 == 0 {
+            let h = pos.y.min(7.0);
+            commands.spawn((
+                InGameEntity,
+                Mesh3d(ray_mesh.clone()),
+                MeshMaterial3d(god_ray_mat.clone()),
+                Transform::from_xyz(pos.x, h * 0.5, pos.z).with_scale(Vec3::new(1.0 + h * 0.2, h / 6.0, 1.0 + h * 0.2)),
+                bevy::pbr::NotShadowCaster,
+                bevy::pbr::NotShadowReceiver,
+            ));
+        }
     }
 
     // Sun by day, a pale moon by night. The sun is a little warm; a weak

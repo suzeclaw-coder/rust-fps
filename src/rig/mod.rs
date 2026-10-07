@@ -1579,29 +1579,28 @@ fn animate(
         }
         if rig.flinch > 0.0 {
             let k = rig.flinch;
-            // Visceral CoD-style hit reaction:
-            // Violent ballistic impact: head snaps backward, spine twists away from bullet entry vector,
-            // arms get thrown back momentarily, and upper torso buckles/hitches.
+            // Visceral directional impact ballistics & stumbles:
+            // Violent ballistic impact twists the zombie's torso, yanks limbs back, and triggers a stumble/trip dip
             let snap_x = 0.55 * k;
-            let twist_y = 0.35 * k;
-            let buckle_z = -0.15 * k;
+            let twist_y = 0.45 * k;
+            let buckle_z = -0.20 * k;
             pose.spine = pose.spine
                 * Quat::from_rotation_x(snap_x)
                 * Quat::from_rotation_y(twist_y)
                 * Quat::from_rotation_z(buckle_z);
             pose.neck = pose.neck
                 * Quat::from_rotation_x(0.65 * k)
-                * Quat::from_rotation_y(-0.25 * k);
-            pose.pelvis_off.y -= 0.08 * k; // momentary upper body buckle
-            pose.pelvis_off.z += 0.05 * k; // slight knockback hitch
+                * Quat::from_rotation_y(-0.35 * k);
+            pose.pelvis_off.y -= 0.12 * k; // momentary stumble / trip gait dip
+            pose.pelvis_off.z += 0.08 * k; // knockback displacement hitch
 
-            // Arms get jolted backward by impact momentum
+            // Limb knockback: hitting arm/shoulder twists torso and violently yanks limbs back
             for side in 0..2 {
                 let x = sx(side);
-                pose.arms[side].target += v(x * 0.08 * k, 0.12 * k, 0.22 * k);
-                pose.arms[side].elbow += v(x * 0.3 * k, 0.2 * k, -0.4 * k);
+                pose.arms[side].target += v(x * 0.14 * k, 0.18 * k, 0.32 * k);
+                pose.arms[side].elbow += v(x * 0.45 * k, 0.28 * k, -0.55 * k);
                 for f in 0..4 {
-                    pose.fingers[side][f] = (pose.fingers[side][f] + 0.3 * k).min(1.0);
+                    pose.fingers[side][f] = (pose.fingers[side][f] + 0.4 * k).min(1.0);
                 }
             }
         }

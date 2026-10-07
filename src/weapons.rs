@@ -98,6 +98,8 @@ pub struct Loadout {
     pub active: usize,
     fire_cd: f32,
     pub reload: f32,
+    pub tactical_reload: bool,
+    pub inspect: f32,
     burst_left: u32,
     switch_cd: f32,
     pub recoil: f32,
@@ -333,12 +335,29 @@ fn reload(
         return;
     };
     let def = gun_def(gun.id);
+
+    // Inspect weapon flourish
+    if keys.tapped(&settings, Action::Inspect)
+        && loadout.reload <= 0.0
+        && loadout.melee.is_none()
+    {
+        loadout.inspect = 2.4;
+    }
+    if loadout.inspect > 0.0 {
+        loadout.inspect = (loadout.inspect - time.delta_secs()).max(0.0);
+    }
+
     if keys.tapped(&settings, Action::Reload)
         && loadout.reload <= 0.0
         && gun.mag < gun.mag_size()
         && gun.reserve > 0
     {
-        loadout.reload = def.reload * gun.attach.handling(gun.id).reload / speed;
+        loadout.inspect = 0.0;
+        let is_tactical = gun.mag > 0;
+        loadout.tactical_reload = is_tactical;
+        let base_reload = def.reload * gun.attach.handling(gun.id).reload / speed;
+        // Tactical reload (rounds still in mag) is 20% faster: skips bolt rack / slide lock release
+        loadout.reload = if is_tactical { base_reload * 0.80 } else { base_reload };
         loadout.reload_total = loadout.reload;
     }
     if loadout.reload > 0.0 {
@@ -553,6 +572,7 @@ pub fn fire(
     {
         return;
     }
+    loadout.inspect = 0.0;
     if gun.mag == 0 && !free && alt != Some(AltFire::Grenade) {
         loadout.burst_left = 0;
         if mouse.just_pressed(MouseButton::Left) {

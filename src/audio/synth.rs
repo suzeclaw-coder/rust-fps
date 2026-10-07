@@ -7,6 +7,7 @@ use std::f32::consts::TAU;
 pub const RATE: u32 = 44_100;
 
 /// A mono buffer of samples in -1..1.
+#[derive(Clone)]
 pub struct Buf(pub Vec<f32>);
 
 /// Deterministic white noise.
@@ -232,6 +233,13 @@ impl Buf {
         }
         out
     }
+
+    /// Low-pass filter the buffer with a one-pole filter at `cutoff` Hz (auditory tunneling).
+    pub fn low_pass(&self, cutoff: f32) -> Self {
+        let mut lp = Lp::new();
+        let filtered = self.0.iter().map(|&s| lp.run(s, cutoff)).collect();
+        Buf(filtered)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +270,7 @@ pub fn sub_thump(start_hz: f32, end_hz: f32, decay_tau: f32, len: f32) -> Buf {
     .normalize(0.95)
 }
 
-pub fn gunshot(r: &ShotRecipe, seed: u32) -> Buf {
+pub fn gunshot_reverb(r: &ShotRecipe, seed: u32, indoor: bool) -> Buf {
     let mut n = Noise::new(seed);
     let mut hp = Hp::new();
     let mut bp_snap = Bp::new();
@@ -272,7 +280,12 @@ pub fn gunshot(r: &ShotRecipe, seed: u32) -> Buf {
     let mut osc_thump = Osc::new();
     let mut osc_sub = Osc::new();
 
-    let len = (r.tail * 4.5 + 0.12).max(0.35);
+    let tail_mult = if indoor { 0.75 } else { 1.25 };
+    let len = if indoor {
+        (r.tail * 3.6 + 0.16).max(0.32)
+    } else {
+        (r.tail * 5.6 + 0.42).max(0.68)
+    };
 
     let b = render(len, |t| {
         let x = n.next();
@@ -300,26 +313,48 @@ pub fn gunshot(r: &ShotRecipe, seed: u32) -> Buf {
         let sub = osc_sub.sine(48.0 + 36.0 * decay(t, 0.04)) * decay(t, r.tail * 1.4) * 0.8;
 
         // 4. Lingering low rumble
-        let rumble = lp_rumble.run(x, 240.0) * decay(t, r.tail * 2.6) * 0.7;
+        let rumble = lp_rumble.run(x, 240.0) * decay(t, r.tail * 2.6 * tail_mult) * 0.7;
 
         transient * 1.1 + concussive_body * 1.4 + thump * 1.0 + sub + rumble
     });
 
-    // Dual-tap acoustic room / outdoor reverberation tail
-    b.echo(0.045, (r.echo * 0.65).min(0.35), 2)
-        .echo(0.098, (r.echo * 0.85).min(0.45), 3)
-        .normalize(0.98)
+    if indoor {
+        // Enclosed room / corridor: tight slapback echo (20-40ms decay, crisp early reflections)
+        b.echo(0.024, 0.42, 2)
+            .echo(0.038, 0.28, 2)
+            .normalize(0.98)
+    } else {
+        // Open outdoor area: long, rolling sub-bass tail (250-400ms decay)
+        let mut n_tail = Noise::new(seed.wrapping_add(888));
+        let mut lp_tail = Lp::new();
+        let outdoor_tail = render(0.55, |t| {
+            let roll = lp_tail.run(n_tail.next(), 220.0 * decay(t, 0.35) + 60.0);
+            roll * env(t, 0.03, 0.32) * 1.1
+        });
+        b.echo(0.085, (r.echo * 0.7).min(0.35), 2)
+            .echo(0.18, (r.echo * 0.6).min(0.3), 2)
+            .mix(&outdoor_tail, 0.05, 0.75)
+            .normalize(0.98)
+    }
+}
+
+#[allow(dead_code)]
+pub fn gunshot(r: &ShotRecipe, seed: u32) -> Buf {
+    gunshot_reverb(r, seed, false)
 }
 
 /// Gunshot layered with a deep concussive sub-bass thump and acoustic wallop.
-pub fn heavy_gunshot(r: &ShotRecipe, seed: u32, thump_start: f32, thump_end: f32) -> Buf {
-    let shot = gunshot(r, seed);
-    let thump = sub_thump(
-        thump_start,
-        thump_end,
-        (r.tail * 0.85).max(0.08),
-        (r.tail * 3.0 + 0.1).max(0.28),
-    );
+pub fn heavy_gunshot_reverb(
+    r: &ShotRecipe,
+    seed: u32,
+    thump_start: f32,
+    thump_end: f32,
+    indoor: bool,
+) -> Buf {
+    let shot = gunshot_reverb(r, seed, indoor);
+    let thump_decay = if indoor { (r.tail * 0.75).max(0.06) } else { (r.tail * 1.2).max(0.12) };
+    let thump_len = if indoor { (r.tail * 2.2 + 0.1).max(0.24) } else { (r.tail * 3.8 + 0.25).max(0.45) };
+    let thump = sub_thump(thump_start, thump_end, thump_decay, thump_len);
     // Add extra mechanical concussive slap
     let mut n = Noise::new(seed.wrapping_add(101));
     let mut hp = Hp::new();
@@ -331,68 +366,93 @@ pub fn heavy_gunshot(r: &ShotRecipe, seed: u32, thump_start: f32, thump_end: f32
         .normalize(0.98)
 }
 
+#[allow(dead_code)]
+pub fn heavy_gunshot(r: &ShotRecipe, seed: u32, thump_start: f32, thump_end: f32) -> Buf {
+    heavy_gunshot_reverb(r, seed, thump_start, thump_end, false)
+}
+
 /// M1911 Pistol: Crisp metallic slide/action snap transient + punchy pop.
-pub fn pistol_shot(seed: u32) -> Buf {
+pub fn pistol_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 185.0,
         tail: 0.055,
         bright: 5200.0,
         echo: 0.28,
     };
-    let shot = gunshot(&recipe, seed);
+    let shot = gunshot_reverb(&recipe, seed, indoor);
     let action_click = click(3400.0, seed.wrapping_add(201), 0.03);
     shot.mix(&action_click, 0.001, 0.6).normalize(0.96)
 }
 
+#[allow(dead_code)]
+pub fn pistol_shot(seed: u32) -> Buf {
+    pistol_shot_reverb(seed, false)
+}
+
 /// Magnum / Revolver: Thunderous, concussive hand-cannon roar with heavy sub thump & metallic ring.
-pub fn magnum_shot(seed: u32) -> Buf {
+pub fn magnum_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 110.0,
         tail: 0.12,
         bright: 3800.0,
         echo: 0.48,
     };
-    let shot = heavy_gunshot(&recipe, seed, 105.0, 36.0);
+    let shot = heavy_gunshot_reverb(&recipe, seed, 105.0, 36.0, indoor);
     // Cylinder / frame resonant ring overtone
     let ring = bell(&[(2850.0, 0.5, 0.08), (4280.0, 0.3, 0.04)], 0.15);
     shot.mix(&ring, 0.003, 0.35).normalize(0.98)
 }
 
+#[allow(dead_code)]
+pub fn magnum_shot(seed: u32) -> Buf {
+    magnum_shot_reverb(seed, false)
+}
+
 /// SMG: Rapid, snappy, tight muzzle crack with crisp mechanical action cycling.
-pub fn smg_shot(seed: u32) -> Buf {
+pub fn smg_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 220.0,
         tail: 0.042,
         bright: 6200.0,
         echo: 0.22,
     };
-    let shot = gunshot(&recipe, seed);
+    let shot = gunshot_reverb(&recipe, seed, indoor);
     let bolt_click = click(4200.0, seed.wrapping_add(301), 0.025);
     shot.mix(&bolt_click, 0.001, 0.7).normalize(0.95)
 }
 
+#[allow(dead_code)]
+pub fn smg_shot(seed: u32) -> Buf {
+    smg_shot_reverb(seed, false)
+}
+
 /// Assault Rifle: Punchy staccato bark with snappy brassy transients and solid low punch.
-pub fn rifle_shot(seed: u32) -> Buf {
+pub fn rifle_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 135.0,
         tail: 0.075,
         bright: 4600.0,
         echo: 0.36,
     };
-    let shot = gunshot(&recipe, seed);
+    let shot = gunshot_reverb(&recipe, seed, indoor);
     let thump = sub_thump(110.0, 45.0, 0.065, 0.2);
     shot.mix(&thump, 0.0, 0.7).normalize(0.97)
 }
 
+#[allow(dead_code)]
+pub fn rifle_shot(seed: u32) -> Buf {
+    rifle_shot_reverb(seed, false)
+}
+
 /// Shotgun: Devastating close-range blast, massive low-end wallop, wide acoustic roar.
-pub fn shotgun_shot(seed: u32) -> Buf {
+pub fn shotgun_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 72.0,
         tail: 0.16,
         bright: 2800.0,
         echo: 0.52,
     };
-    let shot = heavy_gunshot(&recipe, seed, 92.0, 28.0);
+    let shot = heavy_gunshot_reverb(&recipe, seed, 92.0, 28.0, indoor);
     let spread_crack = render(0.06, {
         let mut n = Noise::new(seed.wrapping_add(401));
         let mut bp = Bp::new();
@@ -401,37 +461,56 @@ pub fn shotgun_shot(seed: u32) -> Buf {
     shot.mix(&spread_crack, 0.0, 0.8).normalize(0.98)
 }
 
+#[allow(dead_code)]
+pub fn shotgun_shot(seed: u32) -> Buf {
+    shotgun_shot_reverb(seed, false)
+}
+
 /// LMG: Heavy sustained hammer, deep thumping punch and echoing rattle.
-pub fn lmg_shot(seed: u32) -> Buf {
+pub fn lmg_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 105.0,
         tail: 0.09,
         bright: 4000.0,
         echo: 0.40,
     };
-    heavy_gunshot(&recipe, seed, 100.0, 36.0)
+    heavy_gunshot_reverb(&recipe, seed, 100.0, 36.0, indoor)
+}
+
+#[allow(dead_code)]
+pub fn lmg_shot(seed: u32) -> Buf {
+    lmg_shot_reverb(seed, false)
 }
 
 /// Sniper Rifle: Deafening high-powered explosion with massive sub shockwave and long rolling outdoor thunder tail.
-pub fn sniper_shot(seed: u32) -> Buf {
+pub fn sniper_shot_reverb(seed: u32, indoor: bool) -> Buf {
     let recipe = ShotRecipe {
         body: 82.0,
         tail: 0.22,
         bright: 3400.0,
         echo: 0.65,
     };
-    let shot = heavy_gunshot(&recipe, seed, 96.0, 26.0);
-    // Lingering rolling thunder tail
-    let mut n = Noise::new(seed.wrapping_add(501));
-    let mut lp = Lp::new();
-    let roll = render(0.7, |t| {
-        lp.run(n.next(), 400.0 * decay(t, 0.2) + 80.0) * env(t, 0.04, 0.35) * 1.3
-    });
-    shot.mix(&roll, 0.06, 0.85).normalize(0.99)
+    let shot = heavy_gunshot_reverb(&recipe, seed, 96.0, 26.0, indoor);
+    if indoor {
+        shot.normalize(0.99)
+    } else {
+        // Lingering rolling thunder tail (outdoor)
+        let mut n = Noise::new(seed.wrapping_add(501));
+        let mut lp = Lp::new();
+        let roll = render(0.7, |t| {
+            lp.run(n.next(), 400.0 * decay(t, 0.2) + 80.0) * env(t, 0.04, 0.35) * 1.3
+        });
+        shot.mix(&roll, 0.06, 0.85).normalize(0.99)
+    }
+}
+
+#[allow(dead_code)]
+pub fn sniper_shot(seed: u32) -> Buf {
+    sniper_shot_reverb(seed, false)
 }
 
 /// A gun fitted with a suppressor: a dull "thup" and a mechanical clack.
-pub fn suppressed(body: f32, seed: u32) -> Buf {
+pub fn suppressed_reverb(body: f32, seed: u32, indoor: bool) -> Buf {
     let mut n = Noise::new(seed);
     let mut lp = Lp::new();
     let mut o = Osc::new();
@@ -441,22 +520,38 @@ pub fn suppressed(body: f32, seed: u32) -> Buf {
             + o.sine(body * 1.4) * decay(t, 0.025) * 0.5
             + x * decay((t - 0.012).abs(), 0.0015) * 0.25
     });
-    b.normalize(0.6)
+    let echo_gain = if indoor { 0.25 } else { 0.1 };
+    let echo_delay = if indoor { 0.025 } else { 0.06 };
+    b.echo(echo_delay, echo_gain, 1).normalize(0.6)
 }
 
-pub fn laser(seed: u32) -> Buf {
+#[allow(dead_code)]
+pub fn suppressed(body: f32, seed: u32) -> Buf {
+    suppressed_reverb(body, seed, false)
+}
+
+pub fn laser_reverb(seed: u32, indoor: bool) -> Buf {
     let mut o = Osc::new();
     let mut o2 = Osc::new();
     let mut n = Noise::new(seed);
-    render(0.35, |t| {
+    let b = render(0.35, |t| {
         let f = 2400.0 * decay(t, 0.06) + 260.0;
         (o.sine(f) + 0.4 * o2.square(f * 0.5 + 30.0 * (t * 60.0).sin())) * env(t, 0.004, 0.09)
             + n.next() * decay(t, 0.01) * 0.3
-    })
-    .normalize(0.8)
+    });
+    if indoor {
+        b.echo(0.03, 0.3, 2).normalize(0.8)
+    } else {
+        b.echo(0.09, 0.2, 1).normalize(0.8)
+    }
 }
 
-pub fn thunder(seed: u32) -> Buf {
+#[allow(dead_code)]
+pub fn laser(seed: u32) -> Buf {
+    laser_reverb(seed, false)
+}
+
+pub fn thunder_reverb(seed: u32, indoor: bool) -> Buf {
     let mut n = Noise::new(seed);
     let mut lp = Lp::new();
     let mut o = Osc::new();
@@ -471,9 +566,21 @@ pub fn thunder(seed: u32) -> Buf {
             + x * spark * decay(t, 0.4) * 0.6
             + o.sine(48.0) * decay(t, 0.3) * 0.8
     });
-    let thump = sub_thump(90.0, 35.0, 0.18, 0.65);
-    base.mix(&thump, 0.0, 1.0).normalize(0.95)
+    let thump_decay = if indoor { 0.12 } else { 0.28 };
+    let thump = sub_thump(90.0, 35.0, thump_decay, 0.65);
+    let out = base.mix(&thump, 0.0, 1.0);
+    if indoor {
+        out.echo(0.035, 0.35, 2).normalize(0.95)
+    } else {
+        out.echo(0.12, 0.4, 2).normalize(0.95)
+    }
 }
+
+#[allow(dead_code)]
+pub fn thunder(seed: u32) -> Buf {
+    thunder_reverb(seed, false)
+}
+
 
 /// Small mechanical click (bolts, magazines, triggers).
 pub fn click(freq: f32, seed: u32, len: f32) -> Buf {
@@ -524,25 +631,127 @@ pub fn shell(seed: u32) -> Buf {
         .normalize(0.55)
 }
 
+/// Ground surface kind for procedural footstep acoustics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Surface {
+    /// Crisp slap with high transient snap.
+    Concrete,
+    /// Low-pass rustle with dull thump.
+    Grass,
+    /// Resonant metallic ping transient.
+    Metal,
+    /// Squishy splash transient.
+    Puddle,
+}
+
+/// Dynamic procedural footstep tailored to ground material.
+pub fn step_surface(seed: u32, surface: Surface) -> Buf {
+    match surface {
+        Surface::Concrete => {
+            let mut n = Noise::new(seed);
+            let mut lp = Lp::new();
+            let mut bp = Bp::new();
+            let mut hp = Hp::new();
+            render(0.15, |t| {
+                let x = n.next();
+                // Crisp transient high-pass snap in first 4ms
+                let snap = hp.run(x, 3200.0) * decay(t, 0.0035) * 2.6;
+                // Dense heel strike
+                let heel = lp.run(x, 1600.0) * decay(t, 0.022) * 1.7;
+                // Crisp stone gritty slap
+                let grit = bp.run(x, 4200.0, 1.4) * decay(t, 0.032) * 0.55;
+                let toe = if t > 0.035 {
+                    lp.run(x, 1800.0) * decay(t - 0.035, 0.018) * 0.9
+                } else {
+                    0.0
+                };
+                snap + heel + grit + toe
+            })
+            .normalize(0.55)
+        }
+        Surface::Grass => {
+            let mut n = Noise::new(seed);
+            let mut lp_heel = Lp::new();
+            let mut lp_rustle = Lp::new();
+            let mut osc_thump = Osc::new();
+            render(0.18, |t| {
+                let x = n.next();
+                // Soft low-passed heel strike
+                let heel = lp_heel.run(x, 620.0) * decay(t, 0.052) * 1.5;
+                // Low-pass rustling foliage/earth
+                let rustle = lp_rustle.run(x, 1100.0) * decay(t, 0.065) * 0.7;
+                // Dull low-frequency soil thump
+                let thump = osc_thump.sine(80.0 * (1.0 + decay(t, 0.02))) * decay(t, 0.045) * 0.5;
+                let toe = if t > 0.045 {
+                    lp_heel.run(x, 540.0) * decay(t - 0.045, 0.04) * 0.6
+                } else {
+                    0.0
+                };
+                heel + rustle + thump + toe
+            })
+            .normalize(0.5)
+        }
+        Surface::Metal => {
+            let mut n = Noise::new(seed);
+            let mut bp_ping = Bp::new();
+            let mut hp = Hp::new();
+            let mut lp = Lp::new();
+            // Resonant metallic ping partials (grate ring)
+            let ping_bell = bell(&[(1680.0, 0.6, 0.065), (2940.0, 0.45, 0.045), (4420.0, 0.25, 0.03)], 0.16);
+            let impact = render(0.16, |t| {
+                let x = n.next();
+                let click_snap = hp.run(x, 3400.0) * decay(t, 0.003) * 2.2;
+                let grate_slap = bp_ping.run(x, 2200.0, 3.5) * decay(t, 0.025) * 1.4;
+                let clank = lp.run(x, 1400.0) * decay(t, 0.03) * 1.1;
+                click_snap + grate_slap + clank
+            });
+            impact.mix(&ping_bell, 0.001, 0.85).normalize(0.55)
+        }
+        Surface::Puddle => {
+            let mut n = Noise::new(seed);
+            let mut bp_splash = Bp::new();
+            let mut hp_drop = Hp::new();
+            let mut lp_slosh = Lp::new();
+            let mut osc_plop = Osc::new();
+            render(0.18, |t| {
+                let x = n.next();
+                // Crisp water droplet splash transient
+                let drop_snap = hp_drop.run(x, 3800.0) * decay(t, 0.006) * 1.8;
+                // Squishy watery filter sweep
+                let k = t / 0.18;
+                let f = 1900.0 - 1100.0 * k;
+                let splash = bp_splash.run(x, f, 2.2) * decay(t, 0.055) * 1.9;
+                // Sloshing water low-end
+                let slosh = lp_slosh.run(x, 500.0) * decay(t, 0.07) * 1.0;
+                // Subtle bubbly droplet plop
+                let plop = osc_plop.sine(280.0 + 160.0 * decay(t, 0.03)) * decay(t, 0.04) * 0.4;
+                drop_snap + splash + slosh + plop
+            })
+            .normalize(0.55)
+        }
+    }
+}
+
 /// Feet on the ground. `soft` is grass (duller, longer).
 pub fn step(seed: u32, soft: bool) -> Buf {
-    let mut n = Noise::new(seed);
-    let mut lp = Lp::new();
-    let mut bp = Bp::new();
-    let (cut, tau) = if soft { (700.0, 0.05) } else { (1400.0, 0.025) };
-    render(0.16, |t| {
-        let x = n.next();
-        let heel = lp.run(x, cut) * decay(t, tau) * 1.6;
-        let toe = if t > 0.04 {
-            lp.run(x, cut) * decay(t - 0.04, tau * 0.8) * 0.8
-        } else {
-            0.0
-        };
-        let grit = bp.run(x, if soft { 2200.0 } else { 4000.0 }, 1.0) * decay(t, 0.04) * 0.25;
-        heel + toe + grit
-    })
-    .normalize(0.5)
+    step_surface(seed, if soft { Surface::Grass } else { Surface::Concrete })
 }
+
+/// Near-death tinnitus: high-pitch 4 kHz dual-sine ringing tone with subtle beating that fades over 2.5s.
+pub fn tinnitus() -> Buf {
+    let mut o1 = Osc::new();
+    let mut o2 = Osc::new();
+    let len = 2.5;
+    render(len, |t| {
+        // Dual sines at 4000 Hz and 4004 Hz create subtle organic beating
+        let ring = o1.sine(4000.0) * 0.7 + o2.sine(4004.0) * 0.3;
+        // Fades smoothly over 2.5s
+        let envelope = (1.0 - t / len).max(0.0).powf(1.8);
+        ring * envelope * 0.42
+    })
+    .normalize(0.65)
+}
+
 
 pub fn whoosh(len: f32, lo: f32, hi: f32, seed: u32) -> Buf {
     let mut n = Noise::new(seed);
@@ -1127,6 +1336,11 @@ mod tests {
         ok(&ambient_drone(2.0, 31));
         ok(&ability_ready(32));
         ok(&round_start_stinger(33));
+        ok(&step_surface(6, Surface::Concrete));
+        ok(&step_surface(7, Surface::Grass));
+        ok(&step_surface(8, Surface::Metal));
+        ok(&step_surface(9, Surface::Puddle));
+        ok(&tinnitus());
         ok(&countdown_beep(false, 34));
         ok(&countdown_beep(true, 35));
         let w = gunshot(

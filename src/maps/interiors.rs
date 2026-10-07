@@ -286,6 +286,7 @@ impl MapLayout {
 
     /// A flat roof over a rectangle, with a ceiling under it.
     pub(crate) fn roof(&mut self, x0: f32, z0: f32, x1: f32, z1: f32, h: f32, color: Color) {
+        self.indoor_areas.push([x0.min(x1), z0.min(z1), x0.max(x1), z0.max(z1)]);
         let mut a = Art::default();
         boxr(
             &mut a.paint,
@@ -319,6 +320,7 @@ impl MapLayout {
         wall: Color,
         roof: Color,
     ) {
+        self.indoor_areas.push([x0.min(x1), z0.min(z1), x0.max(x1), z0.max(z1)]);
         let mut a = Art::default();
         let (cx, cz) = ((x0 + x1) / 2.0, (z0 + z1) / 2.0);
         let (l, w) = (x1 - x0, z1 - z0);
@@ -346,6 +348,7 @@ impl MapLayout {
 
     /// A glasshouse roof: panes on a white frame, ridged along X.
     pub(crate) fn glass_roof(&mut self, x0: f32, z0: f32, x1: f32, z1: f32, h: f32) {
+        self.indoor_areas.push([x0.min(x1), z0.min(z1), x0.max(x1), z0.max(z1)]);
         let mut a = Art::default();
         let white = c(0.92, 0.93, 0.9);
         let (mid, half) = ((z0 + z1) / 2.0, (z1 - z0) / 2.0);

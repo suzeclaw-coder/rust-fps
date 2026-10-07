@@ -1172,6 +1172,8 @@ fn apply_damage(
         // Enough damage to the legs and it goes down and crawls.
         if legs && !killed && !brain.kind.is_boss() {
             brain.leg_damage += amount;
+            // Leg shots trigger a brief stumble/trip gait
+            brain.flinch = brain.flinch.max(0.42);
             let needed = if brain.kind == NetKind::Brute {
                 0.55
             } else {

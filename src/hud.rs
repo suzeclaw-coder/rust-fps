@@ -60,12 +60,14 @@ enum HudText {
     Ammo,
     OtherGun,
     Ability(usize),
+    Fps,
 }
 
 /// Which bar a node fills.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum HudFill {
     Health,
+    GhostHealth,
     Xp,
     Ability(usize),
 }
@@ -265,6 +267,7 @@ fn update_sights(
 }
 
 fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let damage_arc = images.add(arc_image());
     // Scope view: black bars either side of a square lens image.
     let lens = images.add(scope_image());
     commands
@@ -433,6 +436,20 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     ));
                 }
             });
+            for _ in 0..4 {
+                c.spawn((
+                    DamageArc { timer: 0.0, angle: 0.0 },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Px(256.0),
+                        height: Val::Px(256.0),
+                        ..default()
+                    },
+                    Transform::default(),
+                    Visibility::Hidden,
+                    ImageNode::new(damage_arc.clone()),
+                ));
+            }
         });
 
     // Top left: round and info.
@@ -450,6 +467,27 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .with_children(|c| {
             c.spawn((HudText::Round, text("", 52.0, Color::srgb(0.85, 0.12, 0.1))));
             c.spawn((HudText::Info, text("", 20.0, dim)));
+        });
+
+    // Top right: FPS counter and frametime (toggle with F3).
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(18.0),
+                top: Val::Px(12.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                HudText::Fps,
+                text("... FPS", 16.0, Color::srgb(0.2, 0.9, 0.4)),
+            ));
         });
 
     // Top centre: the boss's health bar (hidden until a boss is out).
@@ -532,13 +570,24 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             c.spawn((HudText::Level, text("", 18.0, dim)));
             bar(c, 260.0, 7.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
             c.spawn((HudText::Health, text("", 22.0, white)));
-            bar(
-                c,
-                260.0,
-                16.0,
-                Color::srgb(0.25, 0.85, 0.35),
-                HudFill::Health,
-            );
+            c.spawn((
+                Node { width: Val::Px(260.0), height: Val::Px(16.0), ..default() },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BorderRadius::all(Val::Px(3.0)),
+            )).with_children(|b| {
+                b.spawn((
+                    HudFill::GhostHealth,
+                    Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+                    BackgroundColor(Color::srgb(1.0, 0.9, 0.5)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ));
+                b.spawn((
+                    HudFill::Health,
+                    Node { width: Val::Percent(100.0), height: Val::Percent(100.0), position_type: PositionType::Absolute, ..default() },
+                    BackgroundColor(Color::srgb(0.25, 0.85, 0.35)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ));
+            });
         });
 
     // Bottom centre: abilities.
@@ -702,6 +751,8 @@ fn set_color(tc: &mut TextColor, color: Color) {
 #[derive(Default)]
 struct HudAnimState {
     last_health: f32,
+    ghost_health: f32,
+    ghost_timer: f32,
     flash: f32,
     bar_flash: f32,
     last_points: u32,
@@ -711,6 +762,23 @@ struct HudAnimState {
     level_flash: f32,
     ready_prev: [bool; 5],
     ready_flash: [f32; 5],
+    was_low_ammo: bool,
+    fps_smoothed: f32,
+    show_fps: bool,
+    fps_initialized: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tally_marks(mut n: u32) -> String {
+    let mut s = String::new();
+    while n >= 5 {
+        s.push_str("I̸I̸I̸I̸ ");
+        n -= 5;
+    }
+    for _ in 0..n {
+        s.push('I');
+    }
+    s
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -721,7 +789,8 @@ fn update_hud(
     state: Res<MatchState>,
     loadout: Res<Loadout>,
     settings: Res<Settings>,
-    enemies: Query<(), With<Enemy>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    enemies: Query<&Transform, (With<Enemy>, Without<DamageArc>)>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
     mut fills: Query<
         (&HudFill, &mut Node, &mut BackgroundColor),
@@ -736,7 +805,26 @@ fn update_hud(
         (With<HurtFlash>, Without<HudFill>, Without<AbilityBox>),
     >,
     mut anim: Local<HudAnimState>,
+    mut sounds: ResMut<crate::audio::SoundQueue>,
+    mut damage_arcs: Query<
+        (&mut DamageArc, &mut Transform, &mut Visibility, &mut ImageNode),
+        (With<DamageArc>, Without<Enemy>),
+    >,
 ) {
+    if !anim.fps_initialized {
+        anim.show_fps = true;
+        anim.fps_smoothed = 60.0;
+        anim.fps_initialized = true;
+    }
+    if keyboard.just_pressed(KeyCode::F3) {
+        anim.show_fps = !anim.show_fps;
+    }
+    let dt = time.delta_secs();
+    if dt > 0.0001 {
+        let current_fps = 1.0 / dt;
+        anim.fps_smoothed = anim.fps_smoothed * 0.92 + current_fps * 0.08;
+    }
+
     let Some(me) = roster.me(&session) else {
         return;
     };
@@ -811,7 +899,7 @@ fn update_hud(
                 let v = if state.round == 0 {
                     String::new()
                 } else {
-                    format!("{}", state.round)
+                    format!("{}  {}", tally_marks(state.round), state.round)
                 };
                 (v, Color::srgb(0.85, 0.12, 0.1))
             }
@@ -959,14 +1047,29 @@ fn update_hud(
                 (v, white)
             }
             HudText::Ammo => {
+                let mut is_low = false;
                 let v = match loadout.current() {
                     Some(_) if me.gun_buff().free_ammo => "INFINITE".to_string(),
                     Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
-                    Some(g) => format!("{} / {}", g.mag, g.reserve),
+                    Some(g) => {
+                        let max_mag = crate::data::gun_def(g.id).mag as f32;
+                        if g.mag as f32 <= max_mag * 0.25 {
+                            is_low = true;
+                        }
+                        format!("{} / {}", g.mag, g.reserve)
+                    },
                     None => String::new(),
                 };
+                if is_low && !anim.was_low_ammo {
+                    sounds.here(crate::audio::Snd::DryFire);
+                }
+                anim.was_low_ammo = is_low;
                 let c = match loadout.current() {
                     Some(_) if me.gun_buff().free_ammo => Color::srgb(0.3, 0.9, 1.0),
+                    Some(_) if is_low => {
+                        let pulse = (time.elapsed_secs() * 10.0).sin() * 0.5 + 0.5;
+                        Color::srgb(1.0, 0.75, 0.1).mix(&Color::srgb(1.0, 0.1, 0.1), pulse)
+                    },
                     Some(g) if g.mag <= 3 => Color::srgb(1.0, 0.3, 0.25),
                     _ => white,
                 };
@@ -1046,6 +1149,22 @@ fn update_hud(
                     col,
                 )
             }
+            HudText::Fps => {
+                if !anim.show_fps {
+                    (String::new(), Color::NONE)
+                } else {
+                    let fps = anim.fps_smoothed;
+                    let ms = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
+                    let col = if fps >= 55.0 {
+                        Color::srgb(0.2, 0.9, 0.4)
+                    } else if fps >= 30.0 {
+                        Color::srgb(1.0, 0.8, 0.2)
+                    } else {
+                        Color::srgb(1.0, 0.25, 0.2)
+                    };
+                    (format!("{:.0} FPS ({:.1} ms) [F3]", fps, ms), col)
+                }
+            }
         };
         set(&mut t, value);
         set_color(&mut tc, col);
@@ -1078,6 +1197,11 @@ fn update_hud(
                     col = col.mix(&Color::srgb(1.0, 0.95, 0.95), flash_t * 0.75);
                 }
                 bg.0 = col;
+            }
+            HudFill::GhostHealth => {
+                let pct = (anim.ghost_health / max).clamp(0.0, 1.0);
+                node.width = Val::Percent(pct * 100.0);
+                bg.0 = Color::srgb(1.0, 0.95, 0.5);
             }
             HudFill::Xp => {
                 let pct = if me.level >= MAX_LEVEL {
@@ -1159,14 +1283,51 @@ fn update_hud(
 
     if anim.last_health == 0.0 && me.health > 0.0 {
         anim.last_health = me.health;
+        anim.ghost_health = me.health;
+    } else if me.health > anim.last_health + 0.5 {
+        anim.ghost_health = me.health;
     }
     if me.health < anim.last_health - 0.5 {
         anim.flash = 0.35;
         anim.bar_flash = 0.30;
+        anim.ghost_timer = 0.4;
+
+        let player_pos = Vec3::from_array(me.pos);
+        if let Some(t) = enemies.iter().min_by_key(|t| (t.translation.distance_squared(player_pos) * 1000.0) as i32) {
+            let dx = t.translation.x - player_pos.x;
+            let dz = t.translation.z - player_pos.z;
+            let world_angle = dx.atan2(-dz); 
+            let rel_angle = world_angle - me.yaw;
+            if let Some((mut arc, mut tf, _, _)) = damage_arcs.iter_mut().min_by_key(|(a, _, _, _)| (a.timer * 1000.0) as i32) {
+                arc.timer = 1.5;
+                arc.angle = rel_angle;
+                tf.rotation = Quat::from_rotation_z(-rel_angle);
+            }
+        }
     }
     anim.last_health = me.health;
     anim.flash = (anim.flash - time.delta_secs()).max(0.0);
     anim.bar_flash = (anim.bar_flash - time.delta_secs()).max(0.0);
+
+    if anim.ghost_timer > 0.0 {
+        anim.ghost_timer = (anim.ghost_timer - time.delta_secs()).max(0.0);
+    } else if anim.ghost_health > me.health {
+        anim.ghost_health = (anim.ghost_health - 150.0 * time.delta_secs()).max(me.health);
+    } else {
+        anim.ghost_health = me.health;
+    }
+
+    for (mut arc, _tf, mut vis, mut img) in &mut damage_arcs {
+        if arc.timer > 0.0 {
+            arc.timer = (arc.timer - time.delta_secs()).max(0.0);
+            *vis = Visibility::Inherited;
+            let alpha = (arc.timer / 1.5).min(1.0);
+            img.color = Color::srgba(1.0, 1.0, 1.0, alpha);
+        } else {
+            *vis = Visibility::Hidden;
+        }
+    }
+
     let downed = if me.alive { 0.0 } else { 0.25 };
     hurt.0 = Color::srgba(0.8, 0.0, 0.0, anim.flash.max(downed));
 }
@@ -1829,4 +1990,42 @@ fn boss_bar(
     }
     set(&mut name, boss_name(state.map, state.boss == 2).to_uppercase());
     fill.width = Val::Percent(state.boss_hp * 100.0);
+}
+
+#[derive(Component)]
+struct DamageArc {
+    timer: f32,
+    angle: f32,
+}
+
+fn arc_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: usize = 256;
+    let mut data = vec![0u8; N * N * 4];
+    let c = N as f32 / 2.0;
+    for y in 0..N {
+        for x in 0..N {
+            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+            let r = (dx * dx + dy * dy).sqrt();
+            let angle = dy.atan2(dx);
+            
+            let mut alpha = 0.0;
+            if r > c * 0.7 && r < c * 0.9 {
+                let mut dist = angle - (-std::f32::consts::FRAC_PI_2);
+                while dist > std::f32::consts::PI { dist -= std::f32::consts::TAU; }
+                while dist < -std::f32::consts::PI { dist += std::f32::consts::TAU; }
+                dist = dist.abs();
+                if dist < 0.6 {
+                    alpha = (1.0 - (r - c * 0.8).abs() / (c * 0.1)) * (1.0 - dist / 0.6).powi(2);
+                }
+            }
+            let i = (y * N + x) * 4;
+            data[i] = 220;
+            data[i+1] = 20;
+            data[i+2] = 20;
+            data[i+3] = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+    Image::new(Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: 1 }, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD)
 }

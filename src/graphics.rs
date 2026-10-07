@@ -24,11 +24,42 @@ pub struct GraphicsPlugin;
 impl Plugin for GraphicsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DirectionalLightShadowMap { size: 2048 })
-            .add_systems(Update, (apply_camera, apply_sun, update_camera_mood))
+            .add_systems(
+                Update,
+                (apply_camera, apply_sun, update_camera_mood, update_flicker_lights),
+            )
             .add_systems(
                 PostUpdate,
                 follow_sky.before(bevy::transform::TransformSystem::TransformPropagate),
             );
+    }
+}
+
+/// Organic micro-pulsing luminance flicker for street lamps, lanterns and barrel fires.
+#[derive(Component)]
+pub struct FlickerLight {
+    pub base: f32,
+    pub speed: f32,
+    pub amplitude: f32,
+    pub phase: f32,
+}
+
+pub fn update_flicker_lights(
+    time: Res<Time>,
+    mut lights: Query<(&mut PointLight, &FlickerLight)>,
+    mut timer: Local<f32>,
+) {
+    *timer += time.delta_secs();
+    if *timer < 0.033 {
+        return;
+    }
+    *timer = 0.0;
+    let t = time.elapsed_secs();
+    for (mut light, f) in &mut lights {
+        let wave = (t * f.speed + f.phase).sin() * 0.52
+            + (t * f.speed * 1.63 + f.phase * 1.3).sin() * 0.31
+            + (t * f.speed * 2.71 + f.phase * 0.7).sin() * 0.17;
+        light.intensity = (f.base * (1.0 + wave * f.amplitude)).max(0.0);
     }
 }
 

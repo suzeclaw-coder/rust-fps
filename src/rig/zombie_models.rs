@@ -164,11 +164,11 @@ fn zombie_head(p: &mut Parts, skin: Color, eyes: Color, jaw: f32, scale: f32) {
         );
         p.k(n)
             .blob(k(x * 0.08, -0.04, -0.06), v(0.03, 0.04, 0.03) * scale, dark);
-        // Deep eye sockets with a glow at the back.
+        // Deep eye sockets with eerie glowing emissive eye pips piercing darkness and fog.
         p.k(n)
             .sphere(k(x * 0.045, 0.02, -0.1), 0.03 * scale, c(0.06, 0.04, 0.04));
         p.g(n)
-            .sphere(k(x * 0.045, 0.02, -0.118), 0.013 * scale, eyes);
+            .sphere(k(x * 0.045, 0.02, -0.125), 0.018 * scale, eyes);
         // Ears, one torn.
         p.k(n).blob(
             k(x * 0.115, 0.0, 0.0),

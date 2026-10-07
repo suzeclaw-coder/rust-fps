@@ -44,10 +44,11 @@ pub enum Action {
     Emote,
     Ping,
     Melee,
+    Inspect,
 }
 
 impl Action {
-    pub const ALL: [Action; 20] = [
+    pub const ALL: [Action; 21] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -68,6 +69,7 @@ impl Action {
         Action::Emote,
         Action::Ping,
         Action::Melee,
+        Action::Inspect,
     ];
 
     pub fn label(self) -> &'static str {
@@ -92,6 +94,7 @@ impl Action {
             Action::Emote => "Emotes",
             Action::Ping => "Ping",
             Action::Melee => "Melee",
+            Action::Inspect => "Inspect weapon",
         }
     }
 
@@ -117,6 +120,7 @@ impl Action {
             Action::Emote => KeyCode::KeyG,
             Action::Ping => KeyCode::KeyZ,
             Action::Melee => KeyCode::KeyV,
+            Action::Inspect => KeyCode::KeyI,
         }
     }
 }
