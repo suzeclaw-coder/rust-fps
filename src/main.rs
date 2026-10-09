@@ -556,6 +556,8 @@ pub enum NetKind {
     Wraith,
     /// An in-world ability drop orb that equips to Q/E/R when walked over.
     AbilityDrop(u8),
+    /// Health recovery pack dropped by enemies or spawned in world.
+    HealthPack,
 }
 
 impl NetKind {

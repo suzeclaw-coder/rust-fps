@@ -32,8 +32,10 @@ const INTERACT_RANGE: f32 = 2.6;
 const POWERUP_CHANCE: f64 = 0.03;
 /// Seconds after a drop before another can drop.
 const POWERUP_GAP: f32 = 25.0;
-const REGEN_DELAY: f32 = 4.0;
-const REGEN_RATE: f32 = 20.0;
+const REGEN_DELAY: f32 = 5.0;
+const REGEN_RATE: f32 = 8.0;
+/// Auto-recovery only restores health up to this fraction of max HP (Approach 2).
+const REGEN_CAP_FRACTION: f32 = 0.50;
 
 pub mod powers;
 
@@ -52,26 +54,31 @@ impl Plugin for SimPlugin {
             .add_systems(
                 Update,
                 (
-                    sandbox,
-                    resolve_shots,
-                    player_timers,
-                    status_effects,
-                    projectiles,
-                    powers::grenades,
-                    powers::missiles,
-                    powers::mines,
-                    powers::strikes,
-                    zones,
-                    powers::turrets,
-                    powers::timers,
-                    apply_damage,
-                    rounds,
-                    enemy_ai,
-                    powerups,
-                    ability_pickups,
-                    mystery_box,
-                    teleporter,
-                    check_game_over,
+                    (
+                        sandbox,
+                        resolve_shots,
+                        player_timers,
+                        status_effects,
+                        projectiles,
+                        powers::grenades,
+                        powers::missiles,
+                        powers::mines,
+                        powers::strikes,
+                        zones,
+                        powers::turrets,
+                        powers::timers,
+                    ),
+                    (
+                        apply_damage,
+                        rounds,
+                        enemy_ai,
+                        powerups,
+                        ability_pickups,
+                        health_pickups,
+                        mystery_box,
+                        teleporter,
+                        check_game_over,
+                    ),
                 )
                     .chain()
                     .in_set(Phase::Sim),
@@ -239,6 +246,12 @@ pub struct PowerUpBrain {
 #[derive(Component)]
 pub struct AbilityBrain {
     pub ability: Ability,
+    pub life: f32,
+}
+
+#[derive(Component)]
+pub struct HealthPackBrain {
+    pub heal: f32,
     pub life: f32,
 }
 
@@ -1030,6 +1043,8 @@ fn apply_damage(
     let round = state.round;
     let mut boss_down = None;
     let mut i = 0;
+    let mut chain_burns: Vec<(Entity, Option<u8>)> = Vec::new();
+    let mut chain_slows: Vec<Entity> = Vec::new();
     while i < queue.0.len() {
         let ev = &queue.0[i];
         let (target, from, headshot, legs, elements, chained, stun) = (
@@ -1058,6 +1073,21 @@ fn apply_damage(
         }
         if brain.marked > 0.0 {
             amount *= powers::MARK_BONUS;
+        }
+        if (elements & Element::Fire.bit() != 0 && brain.slow > 0.0)
+            || (elements & Element::Ice.bit() != 0 && brain.burn > 0.0)
+            || ((elements & (Element::Fire.bit() | Element::Ice.bit()))
+                == (Element::Fire.bit() | Element::Ice.bit()))
+        {
+            amount *= 1.35;
+            emit(
+                &mut fx,
+                &mut out,
+                Fx::Sparks {
+                    pos: pos.to_array(),
+                    count: 24,
+                },
+            );
         }
         if elements & powers::effect::MARK != 0 {
             brain.marked = powers::MARK_TIME;
@@ -1144,9 +1174,20 @@ fn apply_damage(
                                 b: (*p + Vec3::Y * 1.2).to_array(),
                             },
                         );
+                        if elements & Element::Fire.bit() != 0 {
+                            chain_burns.push((*e, from));
+                        }
+                        if elements & Element::Ice.bit() != 0 {
+                            chain_slows.push(*e);
+                        }
+                        let chain_mult = if elements & Element::Ice.bit() != 0 {
+                            0.75
+                        } else {
+                            0.6
+                        };
                         queue.0.push(DamageEvent {
                             target: *e,
-                            amount: amount * 0.6,
+                            amount: amount * chain_mult,
                             from,
                             headshot: false,
                             legs: false,
@@ -1353,7 +1394,7 @@ fn apply_damage(
                 _ => Vec::new(),
             };
 
-            for (idx, ability) in ability_drops.into_iter().enumerate() {
+            for (idx, ability) in ability_drops.iter().copied().enumerate() {
                 let id = state.next_net_id;
                 state.next_net_id += 1;
                 let offset = if idx == 0 {
@@ -1371,6 +1412,37 @@ fn apply_damage(
                     AbilityBrain {
                         ability,
                         life: 35.0,
+                    },
+                ));
+            }
+
+            // Health pack drop roll on zombie kill
+            let health_pack_count = match brain.kind {
+                NetKind::Boss(_) => rng.gen_range(1..=2),
+                NetKind::Brute if rng.gen_bool(0.40) => 1,
+                NetKind::Shooter if rng.gen_bool(0.20) => 1,
+                NetKind::Grunt if rng.gen_bool(0.08) => 1,
+                _ => 0,
+            };
+
+            for idx in 0..health_pack_count {
+                let id = state.next_net_id;
+                state.next_net_id += 1;
+                let offset = if idx == 0 && ability_drops.is_empty() {
+                    Vec3::ZERO
+                } else {
+                    Vec3::new(rng.gen_range(-0.7..0.7), 0.0, rng.gen_range(-0.7..0.7))
+                };
+                commands.spawn((
+                    crate::InGameEntity,
+                    Replicated {
+                        id,
+                        kind: NetKind::HealthPack,
+                    },
+                    Transform::from_translation(pos + offset + Vec3::Y * 0.5),
+                    HealthPackBrain {
+                        heal: 35.0,
+                        life: 30.0,
                     },
                 ));
             }
@@ -1400,6 +1472,18 @@ fn apply_damage(
                     Transform::from_translation(pos.with_y(0.9)),
                 ));
             }
+        }
+    }
+    for (target, from) in chain_burns {
+        if let Ok((_, _, mut b, _)) = enemies.get_mut(target) {
+            b.burn = 1.5;
+            b.burn_dps = 10.0 + 2.0 * round as f32;
+            b.burn_by = from;
+        }
+    }
+    for target in chain_slows {
+        if let Ok((_, _, mut b, _)) = enemies.get_mut(target) {
+            b.slow = 2.5;
         }
     }
     queue.0.clear();
@@ -1485,7 +1569,10 @@ fn player_timers(
             let since = hurt.0.entry(p.id).or_insert(99.0);
             *since += dt;
             if *since > REGEN_DELAY {
-                p.health = (p.health + REGEN_RATE * dt).min(p.max_health());
+                let cap = p.max_health() * REGEN_CAP_FRACTION;
+                if p.health < cap {
+                    p.health = (p.health + REGEN_RATE * dt).min(cap);
+                }
             }
         }
     }
@@ -2718,6 +2805,42 @@ fn ability_pickups(
     }
 }
 
+fn health_pickups(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut roster: ResMut<Roster>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
+    mut pickups: Query<(Entity, &Transform, &mut HealthPackBrain)>,
+) {
+    let dt = time.delta_secs();
+    for (e, tf, mut brain) in &mut pickups {
+        brain.life -= dt;
+        if brain.life <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let pickup_pos = tf.translation.with_y(0.0);
+        let grabber = roster
+            .0
+            .values_mut()
+            .find(|pl| pl.alive && pl.health < pl.max_health() && pl.feet().with_y(0.0).distance(pickup_pos) < 1.6);
+        let Some(pl) = grabber else {
+            continue;
+        };
+        pl.health = (pl.health + brain.heal).min(pl.max_health());
+        emit(
+            &mut fx,
+            &mut out,
+            Fx::Heal {
+                pos: pl.pos,
+                radius: 1.8,
+            },
+        );
+        commands.entity(e).despawn();
+    }
+}
+
 fn mystery_box(
     mut commands: Commands,
     time: Res<Time>,
@@ -3493,6 +3616,7 @@ mod tests {
         assert_eq!(brain.poise, 0.0, "Poise should be 0 on posture break");
         assert_eq!(brain.poise_broken, 1.2, "Poise broken timer should be set to 1.2s for normal enemy");
         assert!(brain.stun >= 1.2, "Stun duration should be set to at least 1.2s on posture break");
+        assert_eq!(brain.slow, 0.0, "Posture break stun must not apply slow/ice effect");
 
         // Verify that posture break triggered spark FX emission
         let fx_queue = app.world().resource::<FxQueue>();
@@ -3809,7 +3933,7 @@ mod tests {
 
     #[test]
     fn test_no_starting_buffs_and_identical_stats() {
-        use crate::data::Character;
+        use crate::data::{Character, Element};
         for c in Character::ALL {
             let mut p = PlayerInfo::new(0, c.name().into(), c, 0);
             assert_eq!(p.max_health(), 100.0, "{} should have 100 base HP", c.name());
@@ -3817,6 +3941,15 @@ mod tests {
             assert_eq!(p.kit, [None, None, None], "{} should have empty kit", c.name());
             assert_eq!(p.buff, None, "{} should start without any weapon buff", c.name());
             assert_eq!(p.buff_time, 0.0);
+            assert_eq!(p.gun_elements, 0, "{} should start with no gun elements", c.name());
+            assert_eq!(p.ability_elements, 0, "{} should start with no ability elements", c.name());
+            assert_eq!(p.gun_buff().elements, 0, "{} should have no elemental gun buff at start", c.name());
+            assert_eq!(
+                (p.gun_elements | p.gun_buff().elements) & Element::Ice.bit(),
+                0,
+                "{} must not have any elemental ice gun effect at start",
+                c.name()
+            );
             p.damage(40.0);
             assert_eq!(p.health, 60.0, "{} should take standard unmodified damage", c.name());
         }
@@ -3857,7 +3990,7 @@ mod tests {
 
     #[test]
     fn test_player_starts_from_nothing() {
-        use crate::data::{Character, Attach};
+        use crate::data::{Character, Attach, Element};
         for c in Character::ALL {
             let p = PlayerInfo::new(0, "Test".into(), c, 0);
             assert_eq!(p.points, 0, "Points must start at 0");
@@ -3866,13 +3999,20 @@ mod tests {
             assert_eq!(p.class_guns, [(0, Attach::NONE), (0, Attach::NONE)]);
             assert_eq!(p.attach, [Attach::NONE; 2]);
             assert_eq!(p.gun_tiers, [0; 2]);
+            assert_eq!(p.gun_elements, 0, "Gun elements must be 0 at start");
+            assert_eq!(p.ability_elements, 0, "Ability elements must be 0 at start");
+            assert_eq!(p.gun_elements & Element::Ice.bit(), 0, "No ice gun effect at start");
         }
         let mut p = PlayerInfo::new(0, "Test".into(), Character::Bulwark, 0);
         p.points = 5000;
         p.guns = [Some(6), Some(10)];
+        p.gun_elements = Element::Ice.bit();
+        p.ability_elements = Element::Fire.bit();
         p.reset_for_match();
         assert_eq!(p.points, 0);
         assert_eq!(p.guns, [Some(0), None]);
+        assert_eq!(p.gun_elements, 0, "Gun elements must be reset to 0 for a new match");
+        assert_eq!(p.ability_elements, 0, "Ability elements must be reset to 0 for a new match");
     }
 
     #[test]
@@ -3946,6 +4086,308 @@ mod tests {
 
         let reward = 300 + 100 * state.round;
         assert_eq!(reward, 600);
+    }
+
+    fn test_enemy_brain(hp: f32) -> EnemyBrain {
+        EnemyBrain {
+            kind: NetKind::Grunt,
+            health: hp,
+            knockback: Vec3::ZERO,
+            speed: 2.0,
+            attack_timer: 1.0,
+            burn: 0.0,
+            burn_dps: 0.0,
+            burn_by: None,
+            slow: 0.0,
+            max_health: hp,
+            leg_damage: 0.0,
+            crawler: false,
+            swing: 0.0,
+            stun: 0.0,
+            flinch: 0.0,
+            slam: false,
+            volley: 0.0,
+            summons: 0,
+            poison: 0.0,
+            poison_dps: 0.0,
+            poison_by: None,
+            marked: 0.0,
+            is_sprinter: false,
+            flank_bias: 0.0,
+            attack_windup: None,
+            poise: 50.0,
+            max_poise: 50.0,
+            poise_broken: 0.0,
+            since_hit: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_elemental_synergy_thermal_shock() {
+        // Test 1: Hit with Fire while target has slow > 0.0
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let mut brain_slow = test_enemy_brain(100.0);
+        brain_slow.slow = 2.0;
+        let e1 = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            brain_slow,
+        )).id();
+
+        app.world_mut().resource_mut::<DamageQueue>().0.push(DamageEvent {
+            target: e1,
+            amount: 20.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: Element::Fire.bit(),
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let brain1 = app.world().get::<EnemyBrain>(e1).unwrap();
+        // 20.0 * 1.35 = 27.0 damage
+        assert!((brain1.health - (100.0 - 27.0)).abs() < 1e-4);
+        let fx_queue = app.world().resource::<FxQueue>();
+        assert!(fx_queue.0.iter().any(|fx| matches!(fx, Fx::Sparks { count: 24, .. })));
+
+        // Test 2: Hit with both Fire and Ice together
+        let mut app2 = App::new();
+        app2.add_plugins(MinimalPlugins);
+        app2.insert_resource(MatchState::new(0));
+        app2.insert_resource(Roster::default());
+        app2.insert_resource(DamageQueue::default());
+        app2.insert_resource(FxQueue::default());
+        app2.insert_resource(FxOutbox::default());
+        app2.add_systems(Update, apply_damage);
+
+        let e2 = app2.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            test_enemy_brain(100.0),
+        )).id();
+
+        app2.world_mut().resource_mut::<DamageQueue>().0.push(DamageEvent {
+            target: e2,
+            amount: 30.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: Element::Fire.bit() | Element::Ice.bit(),
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app2.update();
+
+        let brain2 = app2.world().get::<EnemyBrain>(e2).unwrap();
+        // 30.0 * 1.35 = 40.5 damage
+        assert!((brain2.health - (100.0 - 40.5)).abs() < 1e-4);
+        let fx_queue2 = app2.world().resource::<FxQueue>();
+        assert!(fx_queue2.0.iter().any(|fx| matches!(fx, Fx::Sparks { count: 24, .. })));
+
+        // Helper verify helper in data.rs
+        let syn = crate::data::element_synergies(Element::Fire.bit() | Element::Ice.bit());
+        assert_eq!(syn, vec!["Thermal Shock"]);
+    }
+
+    #[test]
+    fn test_elemental_synergy_plasma_arc() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let mut state = MatchState::new(0);
+        state.round = 2;
+        app.insert_resource(state);
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let primary = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            test_enemy_brain(100.0),
+        )).id();
+
+        let secondary = app.world_mut().spawn((
+            Transform::from_xyz(2.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            test_enemy_brain(100.0),
+        )).id();
+
+        app.world_mut().resource_mut::<DamageQueue>().0.push(DamageEvent {
+            target: primary,
+            amount: 20.0,
+            from: Some(1),
+            headshot: false,
+            legs: false,
+            elements: Element::Shock.bit() | Element::Fire.bit(),
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        app.update();
+
+        let sec_brain = app.world().get::<EnemyBrain>(secondary).unwrap();
+        assert_eq!(sec_brain.burn, 1.5, "Chained target should be ignited by Plasma Arc");
+        assert_eq!(sec_brain.burn_dps, 14.0, "Burn DPS: 10.0 + 2.0 * round(2) = 14.0");
+        assert_eq!(sec_brain.burn_by, Some(1));
+
+        let syn = crate::data::element_synergies(Element::Shock.bit() | Element::Fire.bit());
+        assert_eq!(syn, vec!["Plasma Arc"]);
+    }
+
+    #[test]
+    fn test_elemental_synergy_superconductor() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(MatchState::new(0));
+        app.insert_resource(Roster::default());
+        app.insert_resource(DamageQueue::default());
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, apply_damage);
+
+        let primary = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            test_enemy_brain(100.0),
+        )).id();
+
+        let mut sec_brain_init = test_enemy_brain(100.0);
+        sec_brain_init.slow = 0.5;
+        let secondary = app.world_mut().spawn((
+            Transform::from_xyz(2.0, 0.0, 0.0),
+            EnemyStatus::default(),
+            sec_brain_init,
+        )).id();
+
+        app.world_mut().resource_mut::<DamageQueue>().0.push(DamageEvent {
+            target: primary,
+            amount: 40.0,
+            from: None,
+            headshot: false,
+            legs: false,
+            elements: Element::Shock.bit() | Element::Ice.bit(),
+            chained: false,
+            stun: 0.0,
+            knockback: Vec3::ZERO,
+        });
+        // First update processes primary hit, chains shock with 0.75x damage (40.0 * 0.75 = 30.0)
+        // and refreshes slow to 2.5 on secondary target
+        app.update();
+
+        let sec_brain = app.world().get::<EnemyBrain>(secondary).unwrap();
+        assert_eq!(sec_brain.slow, 2.5, "Chained target slow duration should be refreshed to 2.5s");
+        // Chained shock deals 40.0 * 0.75 = 30.0 damage to secondary target
+        assert!((sec_brain.health - (100.0 - 30.0)).abs() < 1e-4, "Secondary health should be 70.0 after 30.0 superconductor shock damage, got {}", sec_brain.health);
+
+        let syn = crate::data::element_synergies(Element::Shock.bit() | Element::Ice.bit());
+        assert_eq!(syn, vec!["Superconductor"]);
+    }
+
+    #[test]
+    fn test_health_recovery_soft_cap_and_delay() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(100)));
+        let mut state = MatchState::new(0);
+        state.started = true;
+        app.insert_resource(state);
+        let mut roster = Roster::default();
+        let mut player = PlayerInfo::new(1, "TestHero".into(), crate::data::Character::Bulwark, 0);
+        player.health = 20.0; // max_health() is 100.0, cap is 50.0
+        roster.0.insert(1, player);
+        app.insert_resource(roster);
+        let mut hurt = LastHurt::default();
+        hurt.0.insert(1, 0.0); // Just took damage, delay is 5.0s
+        app.insert_resource(hurt);
+        app.add_systems(Update, player_timers);
+        app.update(); // Initialize Bevy time delta
+
+        // 45 updates of 0.1s = 4.5s (< 5.0s REGEN_DELAY)
+        for _ in 0..45 {
+            app.update();
+        }
+        let r = app.world().resource::<Roster>();
+        let p = r.0.get(&1).unwrap();
+        assert_eq!(p.health, 20.0, "Player health should not regenerate before REGEN_DELAY has elapsed");
+
+        // 10 updates of 0.1s = 1.0s (timer goes from 4.5s to 5.5s, 0.5s of regen at 8 HP/s = +4 HP)
+        for _ in 0..10 {
+            app.update();
+        }
+        let r = app.world().resource::<Roster>();
+        let p = r.0.get(&1).unwrap();
+        assert!((p.health - 24.0).abs() < 1e-3, "Player health should regenerate at 8 HP/s after delay: expected 24.0, got {}", p.health);
+
+        // Run another 100 updates (10.0s) -> should hit soft cap at 50% max health (50.0 HP)
+        for _ in 0..100 {
+            app.update();
+        }
+        let r = app.world().resource::<Roster>();
+        let p = r.0.get(&1).unwrap();
+        assert_eq!(p.health, 50.0, "Auto-recovery should be capped at 50% max health (Approach 2)");
+    }
+
+    #[test]
+    fn test_health_pack_pickup_heals_past_soft_cap() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(100)));
+        let mut roster = Roster::default();
+        let mut player = PlayerInfo::new(1, "TestHero".into(), crate::data::Character::Bulwark, 0);
+        player.pos = [0.0, 0.0, 0.0];
+        player.health = 50.0; // At 50% cap
+        roster.0.insert(1, player);
+        app.insert_resource(roster);
+        app.insert_resource(FxQueue::default());
+        app.insert_resource(FxOutbox::default());
+        app.add_systems(Update, health_pickups);
+        app.update();
+
+        // Spawn a health pack (+35 HP) right at player's location
+        let pack = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.5, 0.0),
+            HealthPackBrain {
+                heal: 35.0,
+                life: 30.0,
+            },
+        )).id();
+
+        app.update();
+
+        let r = app.world().resource::<Roster>();
+        let p = r.0.get(&1).unwrap();
+        assert_eq!(p.health, 85.0, "Health pack should heal past the 50% auto-regen cap up to max health (50 + 35 = 85)");
+        assert!(app.world().get_entity(pack).is_err(), "Health pack entity should be despawned on pickup");
+
+        // Spawn a second health pack: should cap at max_health() (100.0), not overflow
+        let pack2 = app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.5, 0.0),
+            HealthPackBrain {
+                heal: 35.0,
+                life: 30.0,
+            },
+        )).id();
+
+        app.update();
+
+        let r = app.world().resource::<Roster>();
+        let p = r.0.get(&1).unwrap();
+        assert_eq!(p.health, 100.0, "Health pack should not heal above player max_health (100.0)");
+        assert!(app.world().get_entity(pack2).is_err(), "Second health pack entity should also despawn");
     }
 }
 

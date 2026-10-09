@@ -2095,6 +2095,37 @@ impl Element {
             Element::Shock => "arcs to nearby enemies",
         }
     }
+
+    /// Elemental synergies / combos active when combining two or more elements:
+    /// - **Thermal Shock** (Fire + Ice): Shatter bonus damage when burning enemies take Ice damage or vice versa (+35% shatter burst).
+    /// - **Plasma Arc** (Fire + Shock): When shocking with Fire active, the shock chain lightning also ignites secondary chained targets.
+    /// - **Superconductor** (Ice + Shock): Shock chain hits on slowed enemies deal +25% bonus shock damage and refresh slow duration.
+    #[allow(dead_code)]
+    pub fn synergies(mask: u8) -> Vec<&'static str> {
+        element_synergies(mask)
+    }
+}
+
+/// Returns the names of active elemental synergies for a given element bitmask:
+/// - **Thermal Shock** (Fire + Ice): Shatter bonus damage when burning enemies take Ice damage or vice versa (+35% shatter burst).
+/// - **Plasma Arc** (Fire + Shock): When shocking with Fire active, the shock chain lightning also ignites secondary chained targets.
+/// - **Superconductor** (Ice + Shock): Shock chain hits on slowed enemies deal +25% bonus shock damage and refresh slow duration.
+pub fn element_synergies(mask: u8) -> Vec<&'static str> {
+    let mut syn = Vec::new();
+    let has_fire = mask & Element::Fire.bit() != 0;
+    let has_ice = mask & Element::Ice.bit() != 0;
+    let has_shock = mask & Element::Shock.bit() != 0;
+
+    if has_fire && has_ice {
+        syn.push("Thermal Shock");
+    }
+    if has_fire && has_shock {
+        syn.push("Plasma Arc");
+    }
+    if has_ice && has_shock {
+        syn.push("Superconductor");
+    }
+    syn
 }
 
 pub fn elements_in(mask: u8) -> impl Iterator<Item = Element> {

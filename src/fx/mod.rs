@@ -2101,7 +2101,7 @@ fn elemental_status_particles(
                 },
             );
         }
-        if status.slowed || status.stunned {
+        if status.slowed {
             // White crystalline frostbite flakes shedding
             let off = Vec3::new(
                 rng.gen_range(-0.3..0.3),

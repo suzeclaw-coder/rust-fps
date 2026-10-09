@@ -353,27 +353,114 @@ fn station_markers(
     time: Res<Time>,
     mut markers: ResMut<Markers>,
     map: Option<Res<CurrentMap>>,
+    roster: Option<Res<crate::Roster>>,
+    session: Option<Res<crate::Session>>,
 ) {
     let Some(map) = map else { return };
     let t = time.elapsed_secs();
-    let pulse = 0.5 + 0.5 * (t * 2.5).sin();
+
+    // Local player upgrade status:
+    // 1. Pending upgrade tokens: energetic Golden/Amber Star Beacon calling player over!
+    // 2. Can afford upgrade (>= 1500 pts): energetic Cyan / Electric Blue Ready Beacon.
+    // 3. Low on funds (< 800 pts) / default: calm, subdued station ring.
+    let me = match (roster.as_deref(), session.as_deref()) {
+        (Some(roster), Some(session)) => roster.me(session),
+        _ => None,
+    };
+
+    let (ring_color, core_color, pulse_rate) = if let Some(me) = me {
+        if me.pending_picks > 0 {
+            // Unspent free upgrade tokens: glowing gold/amber with fast energetic pulse
+            (
+                Color::srgba(1.0, 0.82, 0.2, 0.85),
+                Color::srgba(1.0, 0.9, 0.35, 0.55),
+                4.0,
+            )
+        } else if me.points >= 1500 {
+            // Can afford elemental infusion or stat/weapon upgrade: energetic Cyan / Electric Blue Ready Beacon
+            (
+                Color::srgba(0.2, 0.9, 1.0, 0.8),
+                Color::srgba(0.25, 0.95, 1.0, 0.5),
+                3.0,
+            )
+        } else if me.points < 800 {
+            // Low points: calm, subdued station ring
+            (
+                Color::srgba(0.2, 0.6, 0.8, 0.45),
+                Color::srgba(0.15, 0.5, 0.7, 0.25),
+                1.5,
+            )
+        } else {
+            // Mid points (800..1500): standard cyan terminal ring
+            (
+                Color::srgba(0.15, 0.8, 0.95, 0.65),
+                Color::srgba(0.15, 0.7, 0.9, 0.35),
+                2.2,
+            )
+        }
+    } else {
+        (
+            Color::srgba(0.2, 0.6, 0.8, 0.45),
+            Color::srgba(0.15, 0.5, 0.7, 0.25),
+            1.5,
+        )
+    };
+
+    let pulse = 0.5 + 0.5 * (t * pulse_rate).sin();
+
     for &pos in &map.0.upgrade_stations {
         // High-tech station decal on the ground:
-        // Outer interactive boundary ring (near_upgrade_station is 3.0m)
+        // 1. Outer interactive boundary ring (near_upgrade_station is 3.0m)
         markers.push(Marker::new(
             pos,
             Shape::Donut {
                 inner: 2.7,
-                outer: 2.9 + 0.1 * pulse,
+                outer: 2.9 + 0.12 * pulse,
             },
-            Color::srgba(0.1, 0.85, 1.0, 0.75),
+            ring_color,
         ));
-        // Inner glowing core circle
+
+        // 2. Concentric inner segmented / thin accent ring for high-tech terminal feel
         markers.push(Marker::new(
             pos,
-            Shape::Circle { radius: 1.1 },
-            Color::srgba(0.15, 0.75, 0.95, 0.4),
+            Shape::Donut {
+                inner: 1.85 - 0.05 * pulse,
+                outer: 1.95 + 0.05 * pulse,
+            },
+            ring_color.with_alpha(ring_color.to_linear().alpha * 0.7),
         ));
+
+        // 3. Central glowing core circle
+        markers.push(Marker::new(
+            pos,
+            Shape::Circle {
+                radius: 1.0 + 0.1 * pulse,
+            },
+            core_color,
+        ));
+
+        // 4. Inner rotating geometric accents (cross / diamond beacons pointing cardinal directions)
+        let rot_speed = if me.is_some_and(|p| p.pending_picks > 0) {
+            1.8
+        } else {
+            0.9
+        };
+        let base_angle = t * rot_speed;
+        for i in 0..4 {
+            let angle = base_angle + i as f32 * std::f32::consts::FRAC_PI_2;
+            let dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+            markers.push(
+                Marker::new(
+                    pos,
+                    Shape::Line {
+                        length: 1.6 + 0.15 * pulse,
+                        half_width: 0.04,
+                    },
+                    ring_color.with_alpha(ring_color.to_linear().alpha * 0.75),
+                )
+                .facing(dir),
+            );
+        }
     }
 }
 

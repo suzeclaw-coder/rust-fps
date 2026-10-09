@@ -602,6 +602,17 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     },
                     BackgroundColor(Color::srgb(0.25, 0.85, 0.35)),
                 ));
+                // 50% Auto-Regen Threshold Notch
+                b.spawn((
+                    Node {
+                        width: Val::Px(2.0),
+                        height: Val::Percent(100.0),
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(50.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.45)),
+                ));
             });
         });
 

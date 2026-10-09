@@ -963,6 +963,14 @@ fn fx_sounds(
             Fx::Decapitation { pos } => {
                 sounds.push(Snd::ZombieDeath, Some(Vec3::from_array(pos)), 0.85, 1.3);
             }
+            Fx::Lightning { a, .. } => {
+                sounds.push(Snd::Zap, Some(Vec3::from_array(a)), 0.7, 1.2);
+            }
+            Fx::Sparks { pos, count } => {
+                if count >= 20 {
+                    sounds.push(Snd::Snap, Some(Vec3::from_array(pos)), 0.75, 1.15);
+                }
+            }
             _ => {}
         }
     }
@@ -1214,7 +1222,7 @@ fn match_sounds(
     map: Option<Res<crate::maps::CurrentMap>>,
     mut sounds: ResMut<SoundQueue>,
     mut last: Local<Option<MatchState>>,
-    mut last_me: Local<Option<(u32, u8, u32, [Option<u8>; 2])>>,
+    mut last_me: Local<Option<(u32, u8, u32, [Option<u8>; 2], u8)>>,
 ) {
     let Some(map) = map else { return };
     if let Some(prev) = last.as_ref() {
@@ -1266,30 +1274,36 @@ fn match_sounds(
     *last = Some(state.clone());
 
     if let Some(m) = roster.me(&session) {
-        if let Some((points, perks, level, guns)) = *last_me {
+        if let Some((points, perks, level, guns, pending_picks)) = *last_me {
             if m.perks != perks && m.perks != 0 {
                 sounds.here(Snd::Perk);
             } else if m.points < points && m.guns != guns {
                 sounds.here(Snd::Buy);
             } else if m.points + 10 < points {
                 sounds.here(Snd::Buy);
+            } else if m.pending_picks < pending_picks {
+                sounds.here(Snd::Buy);
             }
             if m.level > level {
                 sounds.here(Snd::LevelUp);
             }
         }
-        *last_me = Some((m.points, m.perks, m.level, m.guns));
+        *last_me = Some((m.points, m.perks, m.level, m.guns, m.pending_picks));
     }
 }
 
 /// Clicks on menu buttons.
 fn ui_sounds(
-    buttons: Query<&Interaction, (Changed<Interaction>, With<Button>)>,
+    buttons: Query<(&Interaction, Option<&crate::ui::UiAction>), (Changed<Interaction>, With<Button>)>,
     mut sounds: ResMut<SoundQueue>,
 ) {
-    for i in &buttons {
+    for (i, action) in &buttons {
         if *i == Interaction::Pressed {
-            sounds.here(Snd::UiClick);
+            if matches!(action, Some(crate::ui::UiAction::Locked)) {
+                sounds.here(Snd::Deny);
+            } else {
+                sounds.here(Snd::UiClick);
+            }
         }
     }
 }

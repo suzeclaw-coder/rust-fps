@@ -58,6 +58,7 @@ pub struct ReplicatedAssets {
     drone: (Handle<Mesh>, Handle<Mesh>),
     rotor: Handle<Mesh>,
     wraith: (Handle<Mesh>, Handle<Mesh>),
+    health_pack: (Handle<Mesh>, Handle<Mesh>),
     /// Blinking red lights on sticky bombs and claymores.
     blinker: Handle<StandardMaterial>,
 }
@@ -141,6 +142,10 @@ fn setup(
         rotor: meshes.add(projectiles::rotor_kit().build_or_empty()),
         wraith: {
             let (k, g) = projectiles::wraith_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+        },
+        health_pack: {
+            let (k, g, _) = projectiles::missile_kit(crate::sim::powers::look::MEDKIT);
             (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
         },
         blinker: glow(&mut materials, Color::srgb(1.0, 0.1, 0.05), 20.0),
@@ -826,6 +831,34 @@ fn dress(
                 ));
             });
         }
+        NetKind::HealthPack => {
+            let (solid, glowing) = assets.health_pack.clone();
+            commands.entity(root).with_children(|p| {
+                let mut e = p.spawn((
+                    Spin,
+                    Hover(1.5),
+                    Mesh3d(solid),
+                    MeshMaterial3d(assets.gadget_mat.clone()),
+                    Transform::from_scale(Vec3::splat(1.6)),
+                    Visibility::default(),
+                ));
+                e.with_child((
+                    Mesh3d(glowing),
+                    MeshMaterial3d(assets.gadget_glow.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                ));
+                p.spawn((
+                    PointLight {
+                        intensity: 30_000.0,
+                        color: Color::srgb(0.25, 1.0, 0.5),
+                        range: 5.5,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.6, 0.0),
+                ));
+            });
+        }
     }
 }
 
@@ -843,8 +876,8 @@ fn enemy_colors(
         } else {
             look.1 = (look.1 - 7.0 * dt).max(0.0);
         }
-        let (tint, glow) = if status.stunned || status.slowed {
-            // Frost: White crystalline frostbite dusting on material albedo with glacial cyan glow
+        let (tint, glow) = if status.slowed {
+            // Frost / Cryo: White crystalline frostbite dusting on material albedo with glacial cyan glow
             (
                 Color::srgb(0.92, 0.96, 1.05),
                 LinearRgba::rgb(0.20, 0.45, 0.75),

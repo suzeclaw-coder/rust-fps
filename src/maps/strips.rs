@@ -815,6 +815,8 @@ pub fn spawn_upgrade_stations(
     let screen_housing_mesh = meshes.add(Cuboid::new(0.72, 0.62, 0.28));
     let screen_display_mesh = meshes.add(Cuboid::new(0.60, 0.46, 0.04));
     let amber_strip_mesh = meshes.add(Cuboid::new(0.68, 0.05, 0.03));
+    let screen_bezel_mesh = meshes.add(Cuboid::new(0.64, 0.50, 0.02));
+    let status_stripe_mesh = meshes.add(Cuboid::new(0.58, 0.03, 0.02));
     let top_canopy_mesh = meshes.add(Cuboid::new(0.86, 0.10, 0.64));
     let holo_beacon_mesh = meshes.add(Cylinder::new(0.14, 0.22));
     let beacon_pillar_mesh = meshes.add(Cylinder::new(0.18, 40.0));
@@ -877,11 +879,28 @@ pub fn spawn_upgrade_stations(
                 Transform::from_xyz(0.0, 1.48, 0.08),
             ));
 
+            // Emissive screen bezel framing the monitor
+            let screen_rot = Quat::from_rotation_x(-0.15);
+            kiosk.spawn((
+                Mesh3d(screen_bezel_mesh.clone()),
+                MeshMaterial3d(trim_mat.clone()),
+                Transform::from_xyz(0.0, 1.50, 0.21).with_rotation(screen_rot),
+                bevy::light::NotShadowCaster,
+            ));
+
             // Glowing cyan terminal screen face (angled slightly down towards player)
             kiosk.spawn((
                 Mesh3d(screen_display_mesh.clone()),
                 MeshMaterial3d(screen_mat.clone()),
-                Transform::from_xyz(0.0, 1.50, 0.23).with_rotation(Quat::from_rotation_x(-0.15)),
+                Transform::from_xyz(0.0, 1.50, 0.23).with_rotation(screen_rot),
+                bevy::light::NotShadowCaster,
+            ));
+
+            // Active terminal status stripe on the bezel top
+            kiosk.spawn((
+                Mesh3d(status_stripe_mesh.clone()),
+                MeshMaterial3d(amber_led_mat.clone()),
+                Transform::from_xyz(0.0, 1.73, 0.20).with_rotation(screen_rot),
                 bevy::light::NotShadowCaster,
             ));
 
@@ -890,6 +909,18 @@ pub fn spawn_upgrade_stations(
                 Mesh3d(top_canopy_mesh.clone()),
                 MeshMaterial3d(trim_mat.clone()),
                 Transform::from_xyz(0.0, 1.84, 0.04),
+            ));
+
+            // Dedicated warm amber/cyan point light on the kiosk canopy
+            kiosk.spawn((
+                PointLight {
+                    color: Color::srgb(0.2, 0.8, 1.0),
+                    intensity: 8_000.0,
+                    range: 6.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 1.95, 0.15),
             ));
 
             // 6. Holographic emitter node atop the canopy
