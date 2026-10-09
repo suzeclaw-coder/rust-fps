@@ -4,17 +4,16 @@
 //! distance haze. See docs/art-direction.md for the numbers.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::core_pipeline::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
-use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::render::view::ColorGrading;
-use bevy::pbr::{
-    CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, DistanceFog,
-    FogFalloff, ScreenSpaceAmbientOcclusion,
+use bevy::light::{
+    CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster,
+    NotShadowReceiver,
 };
+use bevy::pbr::{DistanceFog, FogFalloff, ScreenSpaceAmbientOcclusion};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::render::view::Msaa;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::view::{ColorGrading, Msaa};
 
 use crate::config::Settings;
 use crate::{AppState, MatchState};
@@ -30,7 +29,7 @@ impl Plugin for GraphicsPlugin {
             )
             .add_systems(
                 PostUpdate,
-                follow_sky.before(bevy::transform::TransformSystem::TransformPropagate),
+                follow_sky.before(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
@@ -185,6 +184,7 @@ pub fn spawn_sky(
             NotShadowCaster,
             NotShadowReceiver,
             Transform::default(),
+            Visibility::default(),
         ))
         .with_child((
             Mesh3d(meshes.add(Sphere::new(disc).mesh().ico(3).unwrap())),
@@ -192,6 +192,7 @@ pub fn spawn_sky(
             NotShadowCaster,
             NotShadowReceiver,
             Transform::from_translation(sun_dir.normalize() * (R - 40.0)),
+            Visibility::default(),
         ));
 }
 
@@ -211,10 +212,10 @@ fn apply_camera(
     app_state: Res<State<AppState>>,
     state: Res<MatchState>,
     clear: Res<ClearColor>,
-    mut cams: Query<(Entity, &mut Camera, Ref<Camera3d>)>,
+    cams: Query<(Entity, Ref<Camera3d>)>,
 ) {
     let changed = settings.is_changed() || app_state.is_changed() || clear.is_changed();
-    for (e, mut camera, added) in &mut cams {
+    for (e, added) in &cams {
         if !changed && !added.is_added() {
             continue;
         }
@@ -229,7 +230,7 @@ fn apply_camera(
             ec.remove::<ScreenSpaceAmbientOcclusion>();
         }
         // Always HDR, rolled off to the screen like film.
-        camera.hdr = true;
+        ec.insert(bevy::camera::Hdr);
         ec.insert(Tonemapping::AgX);
         let (temperature, saturation) = if *app_state.get() == AppState::InGame {
             map_grade(state.map, state.night)
@@ -348,7 +349,7 @@ fn apply_sun(
         if !settings.is_changed() && !sun.is_added() {
             continue;
         }
-        sun.shadows_enabled = settings.shadows > 0;
+        sun.shadow_maps_enabled = settings.shadows > 0;
         *cascades = if settings.shadows >= 2 {
             CascadeShadowConfigBuilder {
                 num_cascades: 4,

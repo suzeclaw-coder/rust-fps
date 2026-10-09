@@ -6,6 +6,7 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::text::Justify;
 use bevy::ui::RelativeCursorPosition;
 
 use crate::abilities::{queue_action, ActionCounter};
@@ -60,6 +61,7 @@ impl Plugin for UiPlugin {
                     rebuild_ui,
                     update_sliders,
                     button_colors,
+                    update_station_buttons,
                     menu_scene,
                     carousel::carousel,
                 )
@@ -128,6 +130,7 @@ pub enum UiAction {
     FocusAddress,
     SelectCharacter(Character),
     /// Put an ability in slot 0, 1 or 2 (ultimate) of this character's kit.
+    #[allow(dead_code)]
     PickAbility(u8, crate::data::Ability),
     SelectCrate(u8),
     OpenCrate,
@@ -153,7 +156,9 @@ pub enum UiAction {
     Leave,
     Resume,
     PauseSettings,
+    #[allow(dead_code)]
     ChooseUpgrade(u8),
+    BuyUpgrade(crate::data::Upgrade),
     BackToLobby,
     OpenLoadout,
     /// Bring `gun` in slot 0 (primary) or 1 (secondary).
@@ -273,7 +278,7 @@ fn label(p: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32, colo
     p.spawn((
         Text::new(value),
         TextFont {
-            font_size: size,
+            font_size: size.into(),
             ..default()
         },
         TextColor(color),
@@ -308,11 +313,11 @@ pub fn button_sized(
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(7.0)),
             ..default()
         },
         BackgroundColor(if selected { BUTTON_SELECTED } else { BUTTON }),
-        BorderColor(if selected { ACCENT } else { BUTTON_BORDER }),
-        BorderRadius::all(Val::Px(7.0)),
+        BorderColor::all(if selected { ACCENT } else { BUTTON_BORDER }),
     ));
     if selected {
         e.insert(Selected);
@@ -321,11 +326,11 @@ pub fn button_sized(
         b.spawn((
             Text::new(value),
             TextFont {
-                font_size,
+                font_size: font_size.into(),
                 ..default()
             },
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(JustifyText::Center),
+            TextLayout::justify(Justify::Center),
         ));
     });
 }
@@ -353,7 +358,7 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
             SliderLabel(kind),
             Text::new(kind.label(settings)),
             TextFont {
-                font_size: 18.0,
+                font_size: 18.0.into(),
                 ..default()
             },
             TextColor(Color::WHITE),
@@ -366,11 +371,11 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
                 width: Val::Px(420.0),
                 height: Val::Px(18.0),
                 border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(9.0)),
                 ..default()
             },
             BackgroundColor(BUTTON),
-            BorderColor(BUTTON_BORDER),
-            BorderRadius::all(Val::Px(9.0)),
+            BorderColor::all(BUTTON_BORDER),
         ))
         .with_children(|t| {
             t.spawn((
@@ -378,10 +383,10 @@ fn slider(p: &mut ChildSpawnerCommands, kind: Slider, settings: &Settings) {
                 Node {
                     width: Val::Percent(50.0),
                     height: Val::Percent(100.0),
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
                     ..default()
                 },
                 BackgroundColor(ACCENT),
-                BorderRadius::all(Val::Px(8.0)),
                 Pickable::IGNORE,
             ));
         });
@@ -427,12 +432,12 @@ fn panel(commands: &mut Commands, centered: bool, f: impl FnOnce(&mut ChildSpawn
                         Val::Percent(100.0)
                     },
                     border: UiRect::top(Val::Px(if centered { 3.0 } else { 0.0 })),
+                    border_radius: BorderRadius::all(Val::Px(if centered { 10.0 } else { 0.0 })),
                     overflow: Overflow::clip(),
                     ..default()
                 },
                 BackgroundColor(PANEL),
-                BorderColor(if centered { ACCENT } else { Color::NONE }),
-                BorderRadius::all(Val::Px(if centered { 10.0 } else { 0.0 })),
+                BorderColor::all(if centered { ACCENT } else { Color::NONE }),
             ))
             .with_children(f);
         });
@@ -452,10 +457,10 @@ fn title(p: &mut ChildSpawnerCommands, sub: &str) {
             Node {
                 width: Val::Px(6.0),
                 height: Val::Px(6.0),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
                 ..default()
             },
             BackgroundColor(ACCENT),
-            BorderRadius::all(Val::Px(3.0)),
         ));
         label(r, sub, 22.0, ACCENT);
     });
@@ -654,21 +659,21 @@ fn text_field(
             width: Val::Px(344.0),
             padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
             border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(7.0)),
             ..default()
         },
         BackgroundColor(Color::srgb(0.1, 0.11, 0.16)),
-        BorderColor(if focused {
+        BorderColor::all(if focused {
             ACCENT
         } else {
             BUTTON_BORDER
         }),
-        BorderRadius::all(Val::Px(7.0)),
     ))
     .with_children(|b| {
         b.spawn((
             Text::new(shown),
             TextFont {
-                font_size: 20.0,
+                font_size: 20.0.into(),
                 ..default()
             },
             TextColor(if value.is_empty() && !focused {
@@ -702,7 +707,7 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         button_sized(p, "Play Solo", UiAction::PlaySolo, Some(696.0), false);
         button_sized(p, "Host a Party", UiAction::Host, Some(696.0), false);
         button_sized(p, "Join a Party", UiAction::OpenJoin, Some(696.0), false);
-        let brought = profile.class_loadout(profile.character);
+        let brought = profile.loadout();
         button_sized(
             p,
             format!(
@@ -716,7 +721,7 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         );
         button_sized(
             p,
-            format!("Characters  ({})", profile.character.name()),
+            format!("Hero Select  ({})", profile.character.name()),
             UiAction::OpenCharacters,
             Some(696.0),
             false,
@@ -794,7 +799,7 @@ fn join_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
     });
 }
 
-fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Settings) {
+fn character_screen(commands: &mut Commands, profile: &Profile, _settings: &Settings) {
     panel(commands, false, |p| {
         title(p, "Choose your character");
         row(p, |r| {
@@ -811,19 +816,18 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
         });
         let c = profile.character;
         let (level, into, need) = profile.char_level(c);
-        let kit = profile.kit(c);
-        let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
         p.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
+                row_gap: Val::Px(12.0),
+                width: Val::Px(640.0),
                 padding: UiRect::all(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(8.0)),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.12, 0.13, 0.19, 0.9)),
-            BorderColor(ACCENT),
-            BorderRadius::all(Val::Px(8.0)),
+            BorderColor::all(ACCENT),
         ))
         .with_children(|card| {
             row(card, |r| {
@@ -837,61 +841,26 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
             };
             label(card, xp, 18.0, Color::srgb(0.55, 0.85, 1.0));
             bar(card, if level >= MAX_CHAR_LEVEL { 1.0 } else { into as f32 / need as f32 });
-            // Pick an ability for each key. Locked ones show their level.
-            row(card, |cols| {
-                for slot in 0..3usize {
-                    cols.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
-                        width: Val::Px(268.0),
-                        ..default()
-                    })
-                    .with_children(|col| {
-                        let head = if slot == 2 { "Ultimate" } else { "Ability" };
-                        label(
-                            col,
-                            format!("{head} [{}]", key_name(settings.key(keys[slot]))),
-                            18.0,
-                            ACCENT,
-                        );
-                        for a in c.pool().into_iter().filter(|a| a.is_ult() == (slot == 2)) {
-                            let unlock = a.def().unlock;
-                            if unlock > level {
-                                button_sized(
-                                    col,
-                                    format!("{}  (Lv {unlock})", a.name()),
-                                    UiAction::Locked,
-                                    Some(268.0),
-                                    false,
-                                );
-                            } else {
-                                button_sized(
-                                    col,
-                                    a.name(),
-                                    UiAction::PickAbility(slot as u8, a),
-                                    Some(268.0),
-                                    kit[slot] == a,
-                                );
-                            }
-                        }
-                    });
-                }
+
+            // Zero-buff cosmetic hero info
+            card.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    padding: UiRect::all(Val::Px(12.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.14, 0.9)),
+                BorderColor::all(Color::srgb(0.35, 0.5, 0.7)),
+            ))
+            .with_children(|pc| {
+                label(pc, "Universal Hero Avatar", 20.0, ACCENT);
+                label(pc, "All heroes start clean with 100 HP, standard movement speed, and zero innate buffs.", 15.0, Color::WHITE);
+                label(pc, "Tactical abilities (Q, E), ultimates (R), and weapon buffs are acquired in-game via drops and the Armory.", 14.0, DIM);
             });
-            for (slot, a) in kit.iter().enumerate() {
-                label(
-                    card,
-                    format!("[{}] {}: {}", key_name(settings.key(keys[slot])), a.name(), a.def().desc),
-                    16.0,
-                    Color::WHITE,
-                );
-            }
         });
-        label(
-            p,
-            "Play matches as a character to level them up and unlock new abilities. Abilities also get stronger as you level up in a match.",
-            16.0,
-            DIM,
-        );
         button_sized(p, "Back", UiAction::BackToMain, Some(280.0), false);
     });
 }
@@ -902,19 +871,19 @@ fn bar(p: &mut ChildSpawnerCommands, frac: f32) {
         Node {
             width: Val::Px(440.0),
             height: Val::Px(10.0),
+            border_radius: BorderRadius::all(Val::Px(5.0)),
             ..default()
         },
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
-        BorderRadius::all(Val::Px(5.0)),
     ))
     .with_child((
         Node {
             width: Val::Percent(frac.clamp(0.0, 1.0) * 100.0),
             height: Val::Percent(100.0),
+            border_radius: BorderRadius::all(Val::Px(5.0)),
             ..default()
         },
         BackgroundColor(Color::srgb(0.55, 0.85, 1.0)),
-        BorderRadius::all(Val::Px(5.0)),
     ));
 }
 
@@ -963,17 +932,17 @@ fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
                         align_items: AlignItems::Center,
                         padding: UiRect::axes(Val::Px(6.0), Val::Px(7.0)),
                         border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(7.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if selected {
+                    BorderColor::all(if selected {
                         ACCENT
                     } else if cr.premium {
                         PREMIUM.with_alpha(0.6)
                     } else {
                         BUTTON_BORDER
                     }),
-                    BorderRadius::all(Val::Px(7.0)),
                 ))
                 .with_children(|b| {
                     label(b, cr.name, 15.0, Color::WHITE);
@@ -1089,15 +1058,15 @@ fn skin_tile(
             align_items: AlignItems::Center,
             padding: UiRect::all(Val::Px(5.0)),
             border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(7.0)),
             ..default()
         },
         BackgroundColor(BUTTON),
-        BorderColor(if selected {
+        BorderColor::all(if selected {
             ACCENT
         } else {
             s.rarity.color().with_alpha(0.5)
         }),
-        BorderRadius::all(Val::Px(7.0)),
     ))
     .with_children(|b| {
         // A two-tone swatch for patterned skins.
@@ -1174,11 +1143,11 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
                         align_items: AlignItems::Center,
                         padding: UiRect::axes(Val::Px(4.0), Val::Px(4.0)),
                         border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(6.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if id == gun { ACCENT } else { BUTTON_BORDER }),
-                    BorderRadius::all(Val::Px(6.0)),
+                    BorderColor::all(if id == gun { ACCENT } else { BUTTON_BORDER }),
                 ))
                 .with_children(|b| {
                     label(b, name, 13.0, Color::WHITE);
@@ -1223,11 +1192,11 @@ fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop)
                         justify_content: JustifyContent::Center,
                         padding: UiRect::all(Val::Px(5.0)),
                         border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(7.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if own { BUTTON_BORDER } else { ACCENT }),
-                    BorderRadius::all(Val::Px(7.0)),
+                    BorderColor::all(if own { BUTTON_BORDER } else { ACCENT }),
                 ))
                 .with_children(|b| {
                     label(b, "Default", 14.0, Color::WHITE);
@@ -1366,15 +1335,15 @@ fn settings_body(
                             padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                             justify_content: JustifyContent::Center,
                             border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(5.0)),
                             ..default()
                         },
                         BackgroundColor(BUTTON),
-                        BorderColor(if rebinding == Some(a) {
+                        BorderColor::all(if rebinding == Some(a) {
                             ACCENT
                         } else {
                             BUTTON_BORDER
                         }),
-                        BorderRadius::all(Val::Px(5.0)),
                     ))
                     .with_children(|b| label(b, text, 16.0, Color::WHITE));
                 }
@@ -1658,11 +1627,11 @@ pub fn autostart(
 }
 
 fn text_input(
-    mut events: EventReader<KeyboardInput>,
+    mut events: MessageReader<KeyboardInput>,
     mut ctrl: Local<bool>,
     mut focus: ResMut<Focus>,
     mut profile: ResMut<Profile>,
-    mut requests: EventWriter<PartyRequest>,
+    mut requests: MessageWriter<PartyRequest>,
 ) {
     for ev in events.read() {
         // Ctrl is tracked from the events in order: a quick Ctrl+V can press
@@ -1771,8 +1740,8 @@ fn handle_buttons(
     mut crate_spin: ResMut<carousel::CrateSpin>,
     (mut tools, mut public_ip): (ResMut<sandbox::Tools>, ResMut<crate::net::PublicIp>),
     mut next: ResMut<NextState<AppState>>,
-    mut requests: EventWriter<PartyRequest>,
-    mut exit: EventWriter<AppExit>,
+    mut requests: MessageWriter<PartyRequest>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
@@ -1802,13 +1771,15 @@ fn handle_buttons(
             UiAction::RevealIp => public_ip.toggle(),
             UiAction::Locked => {}
             UiAction::LoadoutGun(slot, gun) => {
+                let s = slot as usize & 1;
+                profile.loadout_guns[s] = gun;
                 let c = profile.character;
                 let mut picked = profile.class_loadout(c).map(|(g, _)| g);
-                picked[slot as usize & 1] = gun;
+                picked[s] = gun;
                 profile.class_guns.insert(c, picked);
             }
             UiAction::LoadoutAttach(gun_slot, slot, id) => {
-                let (gun, a) = profile.class_loadout(profile.character)[gun_slot as usize & 1];
+                let (gun, a) = profile.loadout()[gun_slot as usize & 1];
                 let (o, m, u, x) = (a.optic(), a.muzzle(), a.under(), a.ext_mag());
                 let a = match slot {
                     0 => Attach::new(id, m, u, x),
@@ -2048,6 +2019,14 @@ fn handle_buttons(
                     PlayerAction::Choose(i),
                 );
             }
+            UiAction::BuyUpgrade(upgrade) => {
+                queue_action(
+                    &session,
+                    &mut counter,
+                    &mut actions,
+                    PlayerAction::BuyUpgrade(upgrade),
+                );
+            }
             UiAction::BackToLobby => {
                 if session.is_authority() {
                     *state = MatchState::new(state.map);
@@ -2096,10 +2075,16 @@ fn update_sliders(
     }
 }
 
+#[derive(Component)]
+pub struct StationCard {
+    pub base_bg: Color,
+    pub hover_bg: Color,
+}
+
 fn button_colors(
     mut buttons: Query<
         (&Interaction, &mut BackgroundColor, Has<Selected>),
-        (With<UiAction>, Changed<Interaction>),
+        (With<UiAction>, Changed<Interaction>, Without<StationCard>),
     >,
 ) {
     for (interaction, mut bg, selected) in &mut buttons {
@@ -2107,6 +2092,18 @@ fn button_colors(
             Interaction::Pressed => BUTTON_PRESS,
             Interaction::Hovered => BUTTON_HOVER,
             Interaction::None => if selected { BUTTON_SELECTED } else { BUTTON },
+        };
+    }
+}
+
+fn update_station_buttons(
+    mut cards: Query<(&Interaction, &mut BackgroundColor, &StationCard), Changed<Interaction>>,
+) {
+    for (interaction, mut bg, card) in &mut cards {
+        bg.0 = match interaction {
+            Interaction::Pressed => card.hover_bg,
+            Interaction::Hovered => card.hover_bg,
+            Interaction::None => card.base_bg,
         };
     }
 }
@@ -2183,7 +2180,7 @@ fn menu_scene(
                 MenuScene,
                 DirectionalLight {
                     illuminance: 9000.0,
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     ..default()
                 },
                 Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::new(2.0, 0.0, -5.0), Vec3::Y),

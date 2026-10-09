@@ -443,7 +443,7 @@ pub(super) fn cast(
 ) {
     use effect::{DRAIN, MARK, POISON};
     let Some(p) = roster.0.get(&id) else { return };
-    let ability = p.kit[slot as usize];
+    let Some(ability) = p.kit[slot as usize] else { return; };
     let tier = p.tiers[slot as usize] as f32;
     let mult = level_multiplier(p);
     let el = p.ability_elements;
@@ -1058,6 +1058,7 @@ pub(super) fn missiles(
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
+    roster: Res<Roster>,
     mut shots: Query<(Entity, &mut Transform, &mut Missile), Without<EnemyBrain>>,
     enemies: Query<(Entity, &Transform, &EnemyBrain)>,
     colliders: Query<(&Transform, &Collider), (Without<Missile>, Without<EnemyBrain>)>,
@@ -1147,6 +1148,7 @@ pub(super) fn missiles(
                 &mut fx,
                 &mut out,
                 color,
+                Some(&roster),
             );
         } else {
             emit(
@@ -1313,6 +1315,7 @@ pub(super) fn grenades(
                     &mut fx,
                     &mut out,
                     Color::srgb(1.0, 0.45, 0.15),
+                    Some(&roster),
                 );
             }
             Nade::Heal => {

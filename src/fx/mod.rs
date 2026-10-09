@@ -8,7 +8,7 @@ pub mod casings;
 pub mod debris;
 mod spells;
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1495,7 +1495,9 @@ pub fn play(
             ),
             Fx::Cast { player, slot } => {
                 if let Some(p) = roster.0.get(&player) {
-                    auras.cast(player, p.kit[slot.min(2) as usize]);
+                    if let Some(ab) = p.kit[slot.min(2) as usize] {
+                        auras.cast(player, ab);
+                    }
                 }
             }
             Fx::Dash { a: from, b: to, .. } => {

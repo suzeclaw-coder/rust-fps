@@ -4,7 +4,7 @@
 //! slightly upward from the weapon, tumbling with random 3D angular spin, arcing under
 //! gravity, and bouncing off the ground and elevated obstacles before settling.
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use std::collections::HashSet;

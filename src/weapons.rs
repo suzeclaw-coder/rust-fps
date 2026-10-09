@@ -3,7 +3,7 @@
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 use rand::Rng;
 
 use crate::config::{Action, InputExt, Settings};
@@ -156,7 +156,7 @@ fn reset_loadout(mut loadout: ResMut<Loadout>, mut aim: ResMut<Aim>) {
 fn aim(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -172,7 +172,7 @@ fn aim(
     };
     let def = gun_def(gun.id);
     // Guns with an alternate fire use right mouse for that instead.
-    let want = can_act(&session, &roster, &state, &paused, &window)
+    let want = can_act(&session, &roster, &state, &paused, &cursor)
         && alt_fire(gun.id) == AltFire::Sights
         && mouse.pressed(MouseButton::Right)
         && cast.aiming.is_none()
@@ -380,7 +380,7 @@ fn melee(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -453,7 +453,7 @@ fn melee(
     }
     if keys.tapped(&settings, Action::Melee)
         && loadout.melee_cd <= 0.0
-        && can_act(&session, &roster, &state, &paused, &window)
+        && can_act(&session, &roster, &state, &paused, &cursor)
         && !p.emoting()
     {
         loadout.melee = Some(0.0);
@@ -492,7 +492,7 @@ pub fn melee_reach(origin: Vec3, dir: Vec3, feet: Vec3, scale: f32, crawl: bool)
 pub fn fire(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -534,7 +534,7 @@ pub fn fire(
         }
     }
 
-    if !can_act(&session, &roster, &state, &paused, &window) {
+    if !can_act(&session, &roster, &state, &paused, &cursor) {
         loadout.burst_left = 0;
         return;
     }

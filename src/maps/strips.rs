@@ -743,3 +743,191 @@ pub fn spawn_wall_guns(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Upgrade stations in the world
+// ---------------------------------------------------------------------------
+
+/// Spawns physical 3D terminal/kiosk meshes for upgrade stations.
+pub fn spawn_upgrade_stations(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    layout: &MapLayout,
+) {
+    if layout.upgrade_stations.is_empty() {
+        return;
+    }
+
+    // Chassis / pedestal material (dark durable metallic alloy)
+    let pedestal_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.20, 0.24),
+        perceptual_roughness: 0.45,
+        reflectance: 0.5,
+        ..default()
+    });
+
+    // Outer framing / trim material (brushed steel / slate)
+    let trim_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.32, 0.35, 0.40),
+        perceptual_roughness: 0.35,
+        reflectance: 0.6,
+        ..default()
+    });
+
+    // High-tech terminal screen (glowing cyber cyan)
+    let screen_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.82, 0.95),
+        emissive: LinearRgba::rgb(0.8, 3.8, 5.0),
+        unlit: false,
+        ..default()
+    });
+
+    // Console accent LED strip / amber status indicator
+    let amber_led_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.65, 0.12),
+        emissive: LinearRgba::rgb(4.5, 2.5, 0.4),
+        unlit: false,
+        ..default()
+    });
+
+    // Holographic emitter / glowing beacon gem
+    let holo_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.2, 0.9, 1.0, 0.75),
+        emissive: LinearRgba::rgb(1.5, 4.5, 6.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+
+    // Tall vertical beacon pillar for long-distance visibility across the map
+    let beacon_beam_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.15, 0.85, 1.0, 0.28),
+        emissive: LinearRgba::rgb(0.6, 2.5, 4.0),
+        alpha_mode: AlphaMode::Add,
+        unlit: true,
+        ..default()
+    });
+
+    // Pre-create shared meshes
+    let base_plate_mesh = meshes.add(Cuboid::new(1.1, 0.16, 0.9));
+    let pillar_body_mesh = meshes.add(Cuboid::new(0.8, 1.1, 0.6));
+    let console_deck_mesh = meshes.add(Cuboid::new(0.84, 0.16, 0.38));
+    let screen_housing_mesh = meshes.add(Cuboid::new(0.72, 0.62, 0.28));
+    let screen_display_mesh = meshes.add(Cuboid::new(0.60, 0.46, 0.04));
+    let amber_strip_mesh = meshes.add(Cuboid::new(0.68, 0.05, 0.03));
+    let top_canopy_mesh = meshes.add(Cuboid::new(0.86, 0.10, 0.64));
+    let holo_beacon_mesh = meshes.add(Cylinder::new(0.14, 0.22));
+    let beacon_pillar_mesh = meshes.add(Cylinder::new(0.18, 40.0));
+    let beacon_core_mesh = meshes.add(Cylinder::new(0.06, 40.0));
+
+    for &spot in &layout.upgrade_stations {
+        let root = commands
+            .spawn((
+                crate::InGameEntity,
+                crate::maps::UpgradeStation,
+                Transform::from_translation(spot),
+                Visibility::default(),
+                crate::Collider {
+                    half: Vec3::new(0.55, 0.95, 0.45),
+                },
+            ))
+            .id();
+
+        commands.entity(root).with_children(|kiosk| {
+            // 1. Heavy base plate / pedestal
+            kiosk.spawn((
+                Mesh3d(base_plate_mesh.clone()),
+                MeshMaterial3d(pedestal_mat.clone()),
+                Transform::from_xyz(0.0, 0.08, 0.0),
+            ));
+
+            // 2. Upright pillar chassis
+            kiosk.spawn((
+                Mesh3d(pillar_body_mesh.clone()),
+                MeshMaterial3d(pedestal_mat.clone()),
+                Transform::from_xyz(0.0, 0.65, 0.0),
+            ));
+
+            // Side trim accents
+            kiosk.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.84, 1.12, 0.06))),
+                MeshMaterial3d(trim_mat.clone()),
+                Transform::from_xyz(0.0, 0.65, -0.28),
+            ));
+
+            // 3. Slanted console deck with keyboard/controls
+            kiosk.spawn((
+                Mesh3d(console_deck_mesh.clone()),
+                MeshMaterial3d(trim_mat.clone()),
+                Transform::from_xyz(0.0, 1.05, 0.22).with_rotation(Quat::from_rotation_x(-0.2)),
+            ));
+
+            // Amber accent light strip below console
+            kiosk.spawn((
+                Mesh3d(amber_strip_mesh.clone()),
+                MeshMaterial3d(amber_led_mat.clone()),
+                Transform::from_xyz(0.0, 0.94, 0.36),
+                bevy::light::NotShadowCaster,
+            ));
+
+            // 4. Upper monitor housing
+            kiosk.spawn((
+                Mesh3d(screen_housing_mesh.clone()),
+                MeshMaterial3d(pedestal_mat.clone()),
+                Transform::from_xyz(0.0, 1.48, 0.08),
+            ));
+
+            // Glowing cyan terminal screen face (angled slightly down towards player)
+            kiosk.spawn((
+                Mesh3d(screen_display_mesh.clone()),
+                MeshMaterial3d(screen_mat.clone()),
+                Transform::from_xyz(0.0, 1.50, 0.23).with_rotation(Quat::from_rotation_x(-0.15)),
+                bevy::light::NotShadowCaster,
+            ));
+
+            // 5. Overhead canopy
+            kiosk.spawn((
+                Mesh3d(top_canopy_mesh.clone()),
+                MeshMaterial3d(trim_mat.clone()),
+                Transform::from_xyz(0.0, 1.84, 0.04),
+            ));
+
+            // 6. Holographic emitter node atop the canopy
+            kiosk.spawn((
+                Mesh3d(holo_beacon_mesh.clone()),
+                MeshMaterial3d(holo_mat.clone()),
+                Transform::from_xyz(0.0, 1.98, 0.04),
+                bevy::light::NotShadowCaster,
+            ));
+
+            // 7. Long-range vertical beacon beam (visible across the map)
+            kiosk.spawn((
+                Mesh3d(beacon_pillar_mesh.clone()),
+                MeshMaterial3d(beacon_beam_mat.clone()),
+                Transform::from_xyz(0.0, 21.0, 0.04),
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
+            ));
+            kiosk.spawn((
+                Mesh3d(beacon_core_mesh.clone()),
+                MeshMaterial3d(screen_mat.clone()),
+                Transform::from_xyz(0.0, 21.0, 0.04),
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
+            ));
+
+            // 8. Terminal ambient glow point light (casts dynamic cyan light around kiosk)
+            kiosk.spawn((
+                PointLight {
+                    intensity: 38_000.0,
+                    color: Color::srgb(0.1, 0.85, 1.0),
+                    range: 6.5,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 1.6, 0.6),
+            ));
+        });
+    }
+}
+

@@ -441,6 +441,7 @@ impl ActiveRagdoll {
     }
 
     /// Applies radial blast impulse from an explosion at `origin`.
+    #[allow(dead_code)]
     pub fn apply_blast(&mut self, origin: Vec3, radius: f32, force: f32) {
         for node in &mut self.nodes {
             let diff = node.pos - origin;

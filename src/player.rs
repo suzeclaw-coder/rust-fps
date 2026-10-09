@@ -3,7 +3,7 @@
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::config::{Action, InputExt, Settings};
 use crate::data::{has_perk, Perk, Stat};
@@ -208,6 +208,7 @@ pub fn spawn_camera(mut commands: Commands) {
             ..default()
         }),
         Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
+        Visibility::default(),
     ));
 }
 
@@ -310,24 +311,24 @@ pub fn can_act(
     roster: &Roster,
     state: &MatchState,
     paused: &Paused,
-    window: &Window,
+    cursor: &CursorOptions,
 ) -> bool {
     !state.game_over
         && !state.won
         && !paused.0
-        && cursor_locked(window)
+        && cursor_locked(cursor)
         && roster.me(session).is_none_or(|me| me.alive)
 }
 
 fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     paused: Res<Paused>,
     aim: Res<crate::weapons::Aim>,
     mut player: Single<&mut LocalPlayer>,
 ) {
-    if !cursor_locked(&window) || paused.0 || player.emoting() {
+    if !cursor_locked(&cursor) || paused.0 || player.emoting() {
         return;
     }
     // Slower turning when zoomed in, so aim feels the same.
@@ -351,7 +352,7 @@ pub fn movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -369,7 +370,7 @@ pub fn movement(
     let boxes = collect_boxes(colliders.iter());
     let me = roster.me(&session);
     let alive = me.is_none_or(|m| m.alive);
-    let active = can_act(&session, &roster, &state, &paused, &window);
+    let active = can_act(&session, &roster, &state, &paused, &cursor);
     let perks = me.map(|m| m.perks).unwrap_or(0);
     let stamina = if has_perk(perks, Perk::Stamina) {
         1.3

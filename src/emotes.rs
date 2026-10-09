@@ -4,7 +4,7 @@
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::config::{Action, InputExt, Settings};
 use crate::game::Paused;
@@ -69,17 +69,17 @@ fn spawn_menu(mut commands: Commands, mut menu: ResMut<EmoteMenu>) {
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(12.0)),
                 row_gap: Val::Px(6.0),
+                border_radius: BorderRadius::all(Val::Px(8.0)),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.85)),
-            BorderRadius::all(Val::Px(8.0)),
             Visibility::Hidden,
         ))
         .with_children(|p| {
             p.spawn((
                 Text::new("EMOTES"),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: 16.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.8, 0.3)),
@@ -88,7 +88,7 @@ fn spawn_menu(mut commands: Commands, mut menu: ResMut<EmoteMenu>) {
                 p.spawn((
                     Text::new(format!("{}  {}", i + 1, name)),
                     TextFont {
-                        font_size: 18.0,
+                        font_size: 18.0.into(),
                         ..default()
                     },
                     TextColor(Color::WHITE),
@@ -97,7 +97,7 @@ fn spawn_menu(mut commands: Commands, mut menu: ResMut<EmoteMenu>) {
             p.spawn((
                 Text::new("G to close"),
                 TextFont {
-                    font_size: 13.0,
+                    font_size: 13.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgb(0.6, 0.65, 0.75)),
@@ -124,7 +124,7 @@ fn emote_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -134,7 +134,7 @@ fn emote_input(
     mut player: Single<&mut LocalPlayer>,
 ) {
     let p = &mut **player;
-    if *app_state.get() != AppState::InGame || !can_act(&session, &roster, &state, &paused, &window)
+    if *app_state.get() != AppState::InGame || !can_act(&session, &roster, &state, &paused, &cursor)
     {
         menu.open = false;
         p.emote = None;

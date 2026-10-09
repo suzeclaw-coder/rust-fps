@@ -7,16 +7,18 @@
 const DIM_HINT: Color = Color::srgba(1.0, 1.0, 1.0, 0.55);
 
 use bevy::prelude::*;
+use bevy::text::Justify;
 
 use crate::config::{key_name, Action, Settings};
 use crate::data::{
-    boss_name, elements_in, gun_def, has_perk, skin_def, xp_to_next, Perk, AMMO_COST, BOX_COST, alt_fire, tier_name, AltFire,
-    FINAL_BOSS_NAME, MAX_LEVEL, ROUNDS_PER_STAGE, STAGES,
+    boss_name, elements_in, gun_def, has_perk, skin_def, xp_to_next, Augment, Element, Perk,
+    Stat, Upgrade, AMMO_COST, BOX_COST, MAX_AUGMENT, alt_fire,
+    tier_name, AltFire, FINAL_BOSS_NAME, MAX_LEVEL, ROUNDS_PER_STAGE, STAGES,
 };
 use crate::sim::TELEPORT_HOLD;
 use crate::game::{match_ended, MatchResult, Overlay};
 use crate::maps::{map_name, CurrentMap};
-use crate::ui::{button_sized, UiAction, ACCENT, PANEL};
+use crate::ui::{button_sized, StationCard, UiAction, ACCENT, PANEL};
 use crate::weapons::Loadout;
 use crate::{AppState, BoxState, Enemy, InGameEntity, MatchState, Phase, Roster, Session};
 
@@ -112,7 +114,7 @@ fn text(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, T
     (
         Text::new(value),
         TextFont {
-            font_size: size,
+            font_size: size.into(),
             ..default()
         },
         TextColor(color),
@@ -385,9 +387,9 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                         top: Val::Px(28.0 - 3.5),
                         width: Val::Px(7.0),
                         height: Val::Px(7.0),
+                        border_radius: BorderRadius::all(Val::Px(3.5)),
                         ..default()
                     },
-                    BorderRadius::all(Val::Px(3.5)),
                     BackgroundColor(Color::srgba(0.9, 0.1, 0.1, 0.0)),
                 ));
                 // Kill confirmation emblem (shows on lethal kill)
@@ -400,12 +402,12 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                         width: Val::Px(14.0),
                         height: Val::Px(14.0),
                         border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(2.0)),
                         ..default()
                     },
                     Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
-                    BorderColor(Color::srgba(1.0, 0.15, 0.1, 0.0)),
+                    BorderColor::all(Color::srgba(1.0, 0.15, 0.1, 0.0)),
                     BackgroundColor(Color::srgba(0.85, 0.05, 0.05, 0.0)),
-                    BorderRadius::all(Val::Px(2.0)),
                     Visibility::Hidden,
                 ));
                 // Four sharp diagonal ticks
@@ -426,13 +428,13 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                             top: Val::Px(28.0 + y * 10.0 - 6.0),
                             width: Val::Px(2.5),
                             height: Val::Px(12.0),
+                            border_radius: BorderRadius::all(Val::Px(1.0)),
                             ..default()
                         },
                         Transform::from_rotation(Quat::from_rotation_z(
                             a * std::f32::consts::FRAC_PI_4,
                         )),
                         BackgroundColor(Color::WHITE),
-                        BorderRadius::all(Val::Px(1.0)),
                     ));
                 }
             });
@@ -529,7 +531,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             c.spawn((
                 BannerText,
                 text("", 36.0, ACCENT),
-                TextLayout::new_with_justify(JustifyText::Center),
+                TextLayout::justify(Justify::Center),
             ));
         });
     commands
@@ -548,7 +550,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             c.spawn((
                 PromptText,
                 text("", 24.0, white),
-                TextLayout::new_with_justify(JustifyText::Center),
+                TextLayout::justify(Justify::Center),
             ));
         });
 
@@ -571,21 +573,34 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             bar(c, 260.0, 7.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
             c.spawn((HudText::Health, text("", 22.0, white)));
             c.spawn((
-                Node { width: Val::Px(260.0), height: Val::Px(16.0), ..default() },
+                Node {
+                    width: Val::Px(260.0),
+                    height: Val::Px(16.0),
+                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    ..default()
+                },
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
-                BorderRadius::all(Val::Px(3.0)),
             )).with_children(|b| {
                 b.spawn((
                     HudFill::GhostHealth,
-                    Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                        ..default()
+                    },
                     BackgroundColor(Color::srgb(1.0, 0.9, 0.5)),
-                    BorderRadius::all(Val::Px(3.0)),
                 ));
                 b.spawn((
                     HudFill::Health,
-                    Node { width: Val::Percent(100.0), height: Val::Percent(100.0), position_type: PositionType::Absolute, ..default() },
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        position_type: PositionType::Absolute,
+                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                        ..default()
+                    },
                     BackgroundColor(Color::srgb(0.25, 0.85, 0.35)),
-                    BorderRadius::all(Val::Px(3.0)),
                 ));
             });
         });
@@ -605,22 +620,22 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Pickable::IGNORE,
         ))
         .with_children(|c| {
-            // Weapon abilities first, then the class abilities.
-            for i in [3, 4, 0, 1, 2] {
+            // Class abilities: 0 = Q, 1 = E, 2 = R
+            for i in [0, 1, 2] {
                 c.spawn((
                     AbilityBox(i),
                     Node {
-                        width: Val::Px(146.0),
+                        width: Val::Px(160.0),
                         height: Val::Px(50.0),
                         border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(6.0)),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         overflow: Overflow::clip(),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.05, 0.06, 0.1, 0.75)),
-                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
-                    BorderRadius::all(Val::Px(6.0)),
+                    BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.3)),
                 ))
                 .with_children(|b| {
                     b.spawn((
@@ -638,7 +653,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     b.spawn((
                         HudText::Ability(i),
                         text("", 15.0, white),
-                        TextLayout::new_with_justify(JustifyText::Center),
+                        TextLayout::justify(Justify::Center),
                     ));
                 });
             }
@@ -695,10 +710,10 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             c.spawn((
                 Node {
                     padding: UiRect::all(Val::Px(16.0)),
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
                     ..default()
                 },
                 BackgroundColor(PANEL),
-                BorderRadius::all(Val::Px(8.0)),
             ))
             .with_children(|p| {
                 p.spawn((ScoreboardText, text("", 16.0, white)));
@@ -717,10 +732,10 @@ fn bar(
         Node {
             width: Val::Px(width),
             height: Val::Px(height),
+            border_radius: BorderRadius::all(Val::Px(3.0)),
             ..default()
         },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
-        BorderRadius::all(Val::Px(3.0)),
     ))
     .with_children(|b| {
         b.spawn((
@@ -728,10 +743,10 @@ fn bar(
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
                 ..default()
             },
             BackgroundColor(color),
-            BorderRadius::all(Val::Px(3.0)),
         ));
     });
 }
@@ -838,14 +853,15 @@ fn update_hud(
         Action::WeaponAbility1,
         Action::WeaponAbility2,
     ];
-    let weapon = me.character.weapon_abilities();
-    let ready = |i: usize| match i {
-        2 => me.ult_charge >= 100.0,
-        3 | 4 => me.weapon_cd[i - 3] <= 0.0,
-        _ => me.charges[i] > 0,
+    let ready = |i: usize| {
+        if i >= me.kit.len() || me.kit[i].is_none() {
+            return false;
+        }
+        match i {
+            2 => me.ult_charge >= 100.0,
+            _ => me.charges[i] > 0,
+        }
     };
-    // The weapon ability running right now (box index).
-    let running = |i: usize| i >= 3 && me.buff_time > 0.0 && me.buff == Some(weapon[i - 3]);
 
     let white = Color::WHITE;
     let dim = Color::srgb(0.75, 0.78, 0.85);
@@ -882,7 +898,7 @@ fn update_hud(
     }
 
     // Track ability readiness transitions for border glow
-    for i in 0..5 {
+    for i in 0..3 {
         let is_ready = ready(i);
         if is_ready && !anim.ready_prev[i] {
             anim.ready_flash[i] = 0.75;
@@ -1015,6 +1031,11 @@ fn update_hud(
                 }
             }
             HudText::Gun => {
+                let buff_str = me
+                    .buff
+                    .filter(|_| me.buff_time > 0.0)
+                    .map(|b| format!("\nBUFF: {} ({:.1}s)", b.name(), me.buff_time))
+                    .unwrap_or_default();
                 let v = loadout
                     .current()
                     .map(|g| {
@@ -1037,7 +1058,7 @@ fn update_hud(
                             a => format!("\n[RMB] {}", a.describe()),
                         };
                         format!(
-                            "{}{}  ({}){extra}{alt_line}",
+                            "{}{}  ({}){extra}{alt_line}{buff_str}",
                             gun_def(g.id).name,
                             tier_name(g.tier),
                             skin_def(me.skin_for(g.id)).name
@@ -1087,67 +1108,64 @@ fn update_hud(
                     .unwrap_or_default();
                 (v, dim)
             }
-            HudText::Ability(i) if i >= 3 => {
-                let w = weapon[i - 3];
-                let (status, col) = if running(i) {
-                    (
-                        format!("ACTIVE {:.1}s", me.buff_time),
-                        Color::srgb(1.0, 0.95, 0.35),
-                    )
-                } else if ready(i) {
-                    ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
-                } else {
-                    (
-                        format!("{:.1}s", me.weapon_cd[i - 3]),
-                        Color::srgb(0.75, 0.78, 0.85),
-                    )
-                };
-                (
-                    format!("{}\n[{}] {}", w.name(), key_name(settings.key(keys[i])), status),
-                    col,
-                )
-            }
             HudText::Ability(i) => {
-                let (status, col) = if i == 2 {
-                    if ready(2) {
+                if let Some(ability) = abilities.get(i).copied().flatten() {
+                    let (status, col) = if i == 2 {
+                        if ready(2) {
+                            ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
+                        } else {
+                            (
+                                format!("{:.0}%", me.ult_charge),
+                                Color::srgb(0.75, 0.78, 0.85),
+                            )
+                        }
+                    } else if me.max_charges(i) > 1 {
+                        let mut t = format!("{}/{}", me.charges[i], me.max_charges(i));
+                        if me.cooldowns[i] > 0.0 {
+                            t += &format!("  {:.1}s", me.cooldowns[i]);
+                        }
+                        let c = if ready(i) {
+                            Color::srgb(0.9, 1.0, 0.95)
+                        } else {
+                            Color::srgb(0.75, 0.78, 0.85)
+                        };
+                        (t, c)
+                    } else if ready(i) {
                         ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
                     } else {
                         (
-                            format!("{:.0}%", me.ult_charge),
+                            format!("{:.1}s", me.cooldowns[i]),
                             Color::srgb(0.75, 0.78, 0.85),
                         )
-                    }
-                } else if me.max_charges(i) > 1 {
-                    let mut t = format!("{}/{}", me.charges[i], me.max_charges(i));
-                    if me.cooldowns[i] > 0.0 {
-                        t += &format!("  {:.1}s", me.cooldowns[i]);
-                    }
-                    let c = if ready(i) {
-                        Color::srgb(0.9, 1.0, 0.95)
-                    } else {
-                        Color::srgb(0.75, 0.78, 0.85)
                     };
-                    (t, c)
-                } else if ready(i) {
-                    ("READY".to_string(), Color::srgb(0.9, 1.0, 0.95))
-                } else {
+                    let roman = ["I", "II", "III", "IV", "V", "VI"][(me.tiers[i] as usize).min(5)];
+                    let copies = me.copies(i);
+                    let many = if copies > 1 { format!(" x{copies}") } else { String::new() };
+                    let key_str = if i < keys.len() {
+                        key_name(settings.key(keys[i]))
+                    } else {
+                        "?".into()
+                    };
                     (
-                        format!("{:.1}s", me.cooldowns[i]),
-                        Color::srgb(0.75, 0.78, 0.85),
+                        format!(
+                            "{} {roman}\n[{}] {}{many}",
+                            ability.name(),
+                            key_str,
+                            status
+                        ),
+                        col,
                     )
-                };
-                let roman = ["I", "II", "III", "IV", "V", "VI"][(me.tiers[i] as usize).min(5)];
-                let copies = me.copies(i);
-                let many = if copies > 1 { format!(" x{copies}") } else { String::new() };
-                (
-                    format!(
-                        "{} {roman}\n[{}] {}{many}",
-                        abilities[i].name(),
-                        key_name(settings.key(keys[i])),
-                        status
-                    ),
-                    col,
-                )
+                } else {
+                    let key_str = if i < keys.len() {
+                        key_name(settings.key(keys[i]))
+                    } else {
+                        "?".into()
+                    };
+                    (
+                        format!("[{}]\nEMPTY", key_str),
+                        Color::srgba(0.6, 0.6, 0.6, 0.5),
+                    )
+                }
             }
             HudText::Fps => {
                 if !anim.show_fps {
@@ -1219,31 +1237,17 @@ fn update_hud(
                     bg.0 = Color::srgb(0.32, 0.65, 1.0);
                 }
             }
-            HudFill::Ability(i) if i >= 3 => {
-                let w = weapon[i - 3];
-                let frac = if running(i) {
-                    me.buff_time / w.def().duration
-                } else {
-                    1.0 - me.weapon_cd[i - 3] / w.cooldown()
-                };
-                node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
-                bg.0 = if running(i) {
-                    w.color().with_alpha(0.55)
-                } else if ready(i) {
-                    Color::srgba(0.2, 0.9, 0.45, 0.30)
-                } else {
-                    Color::srgba(1.0, 0.6, 0.25, 0.30)
-                };
-            }
             HudFill::Ability(i) => {
-                let frac = if i == 2 {
-                    me.ult_charge / 100.0
-                } else {
-                    if me.cooldowns[i] <= 0.0 {
+                let frac = if i < me.kit.len() && me.kit[i].is_some() {
+                    if i == 2 {
+                        me.ult_charge / 100.0
+                    } else if me.cooldowns[i] <= 0.0 {
                         1.0
                     } else {
                         1.0 - me.cooldowns[i] / me.ability_cooldown(i)
                     }
+                } else {
+                    0.0
                 };
                 node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
                 bg.0 = if ready(i) {
@@ -1256,28 +1260,31 @@ fn update_hud(
     }
 
     for (AbilityBox(i), mut border, mut box_bg) in &mut ability_box {
-        let is_running = running(*i);
         let is_ready = ready(*i);
-        if is_running {
-            let pulse = (time.elapsed_secs() * 9.0).sin() * 0.5 + 0.5;
-            let base_col = weapon[*i - 3].color();
-            border.0 = base_col.mix(&Color::WHITE, pulse * 0.35);
-            box_bg.0 = Color::srgba(0.08, 0.12, 0.20, 0.90);
-        } else if is_ready {
-            let flash_t = (anim.ready_flash[*i] / 0.75).clamp(0.0, 1.0);
-            if flash_t > 0.0 {
-                let glow = Color::srgb(0.35, 1.0, 0.65).mix(&Color::WHITE, flash_t);
-                let srgba = glow.to_srgba();
-                border.0 = Color::srgba(srgba.red, srgba.green, srgba.blue, 0.95);
-                box_bg.0 = Color::srgba(0.06, 0.14, 0.10, 0.90);
+        let ability_opt = me.kit.get(*i).copied().flatten();
+        if let Some(a) = ability_opt {
+            if is_ready {
+                let flash_t = (anim.ready_flash.get(*i).copied().unwrap_or(0.0) / 0.75).clamp(0.0, 1.0);
+                let base_glow = a.color();
+                if flash_t > 0.0 {
+                    let glow = base_glow.mix(&Color::WHITE, flash_t);
+                    let srgba = glow.to_srgba();
+                    border.set_all(Color::srgba(srgba.red, srgba.green, srgba.blue, 0.95));
+                    box_bg.0 = Color::srgba(0.06, 0.14, 0.10, 0.90);
+                } else {
+                    let breathe = (time.elapsed_secs() * 3.0).sin() * 0.5 + 0.5;
+                    let srgba = base_glow.to_srgba();
+                    border.set_all(Color::srgba(srgba.red, srgba.green, srgba.blue, 0.75 + 0.20 * breathe));
+                    box_bg.0 = Color::srgba(0.04, 0.08, 0.06, 0.80);
+                }
             } else {
-                let breathe = (time.elapsed_secs() * 3.0).sin() * 0.5 + 0.5;
-                border.0 = Color::srgba(0.3, 0.95, 0.55, 0.75 + 0.20 * breathe);
-                box_bg.0 = Color::srgba(0.04, 0.08, 0.06, 0.80);
+                border.set_all(Color::srgba(0.35, 0.40, 0.50, 0.35));
+                box_bg.0 = Color::srgba(0.03, 0.04, 0.06, 0.85);
             }
         } else {
-            border.0 = Color::srgba(0.35, 0.40, 0.50, 0.35);
-            box_bg.0 = Color::srgba(0.03, 0.04, 0.06, 0.85);
+            // Empty slot: dark/dimmed
+            border.set_all(Color::srgba(0.2, 0.2, 0.25, 0.25));
+            box_bg.0 = Color::srgba(0.02, 0.02, 0.03, 0.75);
         }
     }
 
@@ -1437,7 +1444,7 @@ fn update_hitmarker(
             Visibility::Hidden
         };
         bg.0 = Color::srgba(0.85, 0.04, 0.04, kill_t * 0.55);
-        border.0 = Color::srgba(1.0, 0.15, 0.1, kill_t * 0.95);
+        border.set_all(Color::srgba(1.0, 0.15, 0.1, kill_t * 0.95));
     }
 }
 
@@ -1448,7 +1455,7 @@ fn update_prompt(
     settings: Res<Settings>,
     map: Option<Res<CurrentMap>>,
     overlay: Res<Overlay>,
-    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    cursor: Single<&bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
     mut prompt: Single<&mut Text, With<PromptText>>,
 ) {
     let (Some(me), Some(map)) = (roster.me(&session), map) else {
@@ -1458,7 +1465,7 @@ fn update_prompt(
     let mut msg = String::new();
     if match_ended(&state) {
         // The end screen says it all.
-    } else if *overlay == Overlay::None && !crate::cursor_locked(&window) {
+    } else if *overlay == Overlay::None && !crate::cursor_locked(&cursor) {
         msg = if session.role == crate::Role::Solo {
             "Paused - click to play".into()
         } else {
@@ -1546,11 +1553,8 @@ fn update_prompt(
                 format!("Ammo cache - need {AMMO_COST} pts")
             };
         }
-        if msg.is_empty() && !me.choices.is_empty() {
-            msg = format!(
-                "LEVEL UP! Press [{}] to pick an upgrade",
-                key_name(settings.key(Action::Upgrades))
-            );
+        if map.0.near_upgrade_station(feet3) {
+            msg = format!("[{key}] Upgrade Station - Upgrade weapons, stats & abilities");
         }
     }
     set(&mut prompt, msg);
@@ -1704,7 +1708,7 @@ fn update_scoreboard(
         state.round
     );
     s += "┌──────────────────┬──────────┬───────┬───────┬─────────┬─────────┬──────────┐\n";
-    s += "│ Player           │ Class    │ Level │ Kills │ Score   │ Points  │ Status   │\n";
+    s += "│ Player           │ Hero     │ Level │ Kills │ Score   │ Points  │ Status   │\n";
     s += "├──────────────────┼──────────┼───────┼───────┼─────────┼─────────┼──────────┤\n";
     let mut players: Vec<_> = roster.0.values().collect();
     players.sort_by_key(|p| std::cmp::Reverse(p.score));
@@ -1736,30 +1740,188 @@ fn update_scoreboard(
     set(&mut text, s);
 }
 
-/// The level-up picker: three choices as buttons. Rebuilt when they change.
+#[derive(Default, PartialEq, Eq, Clone)]
+struct StationSnapshot {
+    points: u32,
+    pending_picks: u8,
+    guns: [Option<u8>; 2],
+    gun_tiers: [u8; 2],
+    stats: [u8; 5],
+    gun_elements: u8,
+    ability_elements: u8,
+    tiers: [u8; 3],
+    augments: [u8; 2],
+    kit: [Option<crate::data::Ability>; 3],
+}
+
+fn station_card(
+    p: &mut ChildSpawnerCommands,
+    title: impl Into<String>,
+    desc: impl Into<String>,
+    cost: u32,
+    affordable: bool,
+    maxed: bool,
+    action: UiAction,
+) {
+    let title_str = title.into();
+    let desc_str = desc.into();
+    let (bg_color, hover_bg, border_color, cost_color, cost_text, button_action) = if maxed {
+        (
+            Color::srgba(0.08, 0.1, 0.14, 0.45),
+            Color::srgba(0.08, 0.1, 0.14, 0.45),
+            Color::srgba(0.28, 0.32, 0.4, 0.35),
+            Color::srgb(0.55, 0.6, 0.7),
+            "MAXED".to_string(),
+            UiAction::Locked,
+        )
+    } else if affordable {
+        (
+            Color::srgba(0.08, 0.18, 0.12, 0.82),
+            Color::srgba(0.12, 0.28, 0.18, 0.95),
+            Color::srgb(0.22, 0.85, 0.42),
+            Color::srgb(0.3, 1.0, 0.5),
+            if cost == 0 { "FREE".to_string() } else { format!("{cost} PTS") },
+            action,
+        )
+    } else {
+        (
+            Color::srgba(0.16, 0.08, 0.08, 0.65),
+            Color::srgba(0.18, 0.10, 0.10, 0.75),
+            Color::srgba(0.72, 0.22, 0.22, 0.45),
+            Color::srgb(1.0, 0.4, 0.4),
+            format!("{cost} PTS"),
+            UiAction::Locked,
+        )
+    };
+
+    p.spawn((
+        Button,
+        button_action,
+        StationCard {
+            base_bg: bg_color,
+            hover_bg,
+        },
+        Node {
+            width: Val::Px(265.0),
+            min_height: Val::Px(64.0),
+            padding: UiRect::all(Val::Px(8.0)),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::SpaceBetween,
+            border: UiRect::all(Val::Px(1.5)),
+            border_radius: BorderRadius::all(Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(bg_color),
+        BorderColor::all(border_color),
+    ))
+    .with_children(|b| {
+        // Top row: Title + Cost
+        b.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            width: Val::Percent(100.0),
+            ..default()
+        })
+        .with_children(|header| {
+            header.spawn((
+                Text::new(title_str),
+                TextFont {
+                    font_size: 13.5.into(),
+                    ..default()
+                },
+                TextColor(if maxed { Color::srgb(0.6, 0.65, 0.72) } else { Color::WHITE }),
+            ));
+            header.spawn((
+                Text::new(cost_text),
+                TextFont {
+                    font_size: 13.0.into(),
+                    ..default()
+                },
+                TextColor(cost_color),
+            ));
+        });
+        // Bottom text: description
+        b.spawn((
+            Text::new(desc_str),
+            TextFont {
+                font_size: 11.0.into(),
+                ..default()
+            },
+            TextColor(Color::srgb(0.72, 0.76, 0.84)),
+        ));
+    });
+}
+
+fn spawn_station_column(
+    p: &mut ChildSpawnerCommands,
+    title: &str,
+    color: Color,
+    content: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(8.0),
+        width: Val::Px(265.0),
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_children(|col| {
+        col.spawn((
+            Node {
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                margin: UiRect::bottom(Val::Px(2.0)),
+                ..default()
+            },
+        ))
+        .with_children(|hdr| {
+            hdr.spawn(text(title, 16.0, color));
+        });
+        content(col);
+    });
+}
+
+/// The upgrade station terminal: purchasable weapon, stat, elemental, and ability upgrades.
 fn upgrade_panel(
     mut commands: Commands,
     overlay: Res<Overlay>,
     session: Res<Session>,
     roster: Res<Roster>,
     panels: Query<Entity, With<UpgradePanel>>,
-    mut shown: Local<Option<Vec<crate::data::Upgrade>>>,
+    mut shown: Local<Option<StationSnapshot>>,
 ) {
-    let me = roster.me(&session);
-    let want = (*overlay == Overlay::Upgrades)
-        .then(|| me.map(|m| m.choices.clone()))
-        .flatten()
-        .filter(|c| !c.is_empty());
-    if *shown == want {
+    if *overlay != Overlay::Upgrades {
+        if shown.is_some() {
+            *shown = None;
+            for e in &panels {
+                commands.entity(e).despawn();
+            }
+        }
         return;
     }
-    *shown = want.clone();
+    let Some(me) = roster.me(&session) else {
+        return;
+    };
+    let snap = StationSnapshot {
+        points: me.points,
+        pending_picks: me.pending_picks,
+        guns: me.guns,
+        gun_tiers: me.gun_tiers,
+        stats: me.stats,
+        gun_elements: me.gun_elements,
+        ability_elements: me.ability_elements,
+        tiers: me.tiers,
+        augments: me.augments,
+        kit: me.kit,
+    };
+    if *shown == Some(snap.clone()) {
+        return;
+    }
+    *shown = Some(snap);
     for e in &panels {
         commands.entity(e).despawn();
     }
-    let (Some(choices), Some(me)) = (want, me) else {
-        return;
-    };
+
     commands
         .spawn((
             InGameEntity,
@@ -1772,46 +1934,195 @@ fn upgrade_panel(
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.65)),
         ))
         .with_children(|root| {
             root.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(10.0),
-                    padding: UiRect::all(Val::Px(24.0)),
-                    min_width: Val::Px(520.0),
+                    row_gap: Val::Px(12.0),
+                    padding: UiRect::axes(Val::Px(24.0), Val::Px(18.0)),
+                    min_width: Val::Px(1120.0),
+                    max_width: Val::Px(1180.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(12.0)),
                     ..default()
                 },
                 BackgroundColor(PANEL),
-                BorderRadius::all(Val::Px(10.0)),
+                BorderColor::all(Color::srgb(0.2, 0.65, 0.9)),
             ))
             .with_children(|p| {
+                // Header
+                p.spawn(text("UPGRADE STATION", 28.0, ACCENT));
+
+                // Resources Bar
+                p.spawn((
+                    Node {
+                        padding: UiRect::axes(Val::Px(18.0), Val::Px(6.0)),
+                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        border: UiRect::all(Val::Px(1.5)),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        column_gap: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.05, 0.15, 0.1, 0.9)),
+                    BorderColor::all(Color::srgb(0.2, 0.8, 0.4)),
+                ))
+                .with_children(|res| {
+                    let res_text = if me.pending_picks > 0 {
+                        format!("RESOURCES: {} PTS   |   ⭐ {} FREE TOKENS", me.points, me.pending_picks)
+                    } else {
+                        format!("RESOURCES: {} PTS", me.points)
+                    };
+                    res.spawn(text(res_text, 20.0, Color::srgb(0.3, 1.0, 0.5)));
+                });
+
+                // 4 Category Columns
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(14.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::FlexStart,
+                    ..default()
+                })
+                .with_children(|cols| {
+                    // Column 1: WEAPON UPGRADES
+                    spawn_station_column(cols, "⚔️ WEAPON UPGRADES", Color::srgb(1.0, 0.65, 0.3), |col| {
+                        // Slot 0 (Primary Gun)
+                        if let Some(gun) = me.guns[0] {
+                            let def = gun_def(gun);
+                            let upgrade = Upgrade::Weapon(0);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            let maxed = upgrade.is_maxed(me);
+                            let title = if maxed {
+                                format!("{}: {}", def.name, tier_name(me.gun_tiers[0]))
+                            } else {
+                                format!("{}: {}", def.name, tier_name(me.gun_tiers[0] + 1))
+                            };
+                            let desc = if maxed { "Max tier reached" } else { "+25% damage and magazine size" };
+                            station_card(col, title, desc, cost, can_buy, maxed, UiAction::BuyUpgrade(upgrade));
+                        }
+
+                        // Slot 1 (Secondary Gun)
+                        if let Some(gun) = me.guns[1] {
+                            let def = gun_def(gun);
+                            let upgrade = Upgrade::Weapon(1);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            let maxed = upgrade.is_maxed(me);
+                            let title = if maxed {
+                                format!("{}: {}", def.name, tier_name(me.gun_tiers[1]))
+                            } else {
+                                format!("{}: {}", def.name, tier_name(me.gun_tiers[1] + 1))
+                            };
+                            let desc = if maxed { "Max tier reached" } else { "+25% damage and magazine size" };
+                            station_card(col, title, desc, cost, can_buy, maxed, UiAction::BuyUpgrade(upgrade));
+                        } else {
+                            let upgrade = Upgrade::UnlockSecondary(10);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            station_card(col, "Unlock Breacher 12", "Equip secondary shotgun in slot 2", cost, can_buy, false, UiAction::BuyUpgrade(upgrade));
+                        }
+                    });
+
+                    // Column 2: STAT BOOSTS
+                    spawn_station_column(cols, "🛡️ STAT BOOSTS", Color::srgb(0.3, 0.85, 1.0), |col| {
+                        for st in Stat::ALL {
+                            let upgrade = Upgrade::Stat(st);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            let maxed = upgrade.is_maxed(me);
+                            let current = me.stats[st as usize];
+                            let title = format!("{} ({}/{})", st.name(), current, Stat::MAX_STACKS);
+                            let desc = st.effect();
+                            station_card(col, title, desc, cost, can_buy, maxed, UiAction::BuyUpgrade(upgrade));
+                        }
+                    });
+
+                    // Column 3: ELEMENTAL INFUSIONS
+                    spawn_station_column(cols, "⚡ ELEMENTAL INFUSION", Color::srgb(0.9, 0.45, 1.0), |col| {
+                        for (i, el) in Element::ALL.iter().enumerate() {
+                            let upgrade = Upgrade::GunElement(i as u8);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            let owned = (me.gun_elements & el.bit()) != 0;
+                            let title = format!("{} Rounds", el.name());
+                            let desc = if owned {
+                                format!("ACTIVE: {}", el.effect())
+                            } else {
+                                format!("Infuse bullets: {}", el.effect())
+                            };
+                            station_card(col, title, desc, cost, can_buy, owned, UiAction::BuyUpgrade(upgrade));
+                        }
+                        for (i, el) in Element::ALL.iter().enumerate() {
+                            let upgrade = Upgrade::AbilityElement(i as u8);
+                            let cost = upgrade.cost(me);
+                            let can_buy = upgrade.can_purchase(me);
+                            let owned = (me.ability_elements & el.bit()) != 0;
+                            let title = format!("{} Abilities", el.name());
+                            let desc = if owned {
+                                format!("ACTIVE: abilities {}", el.effect())
+                            } else {
+                                format!("Infuse spells: {}", el.effect())
+                            };
+                            station_card(col, title, desc, cost, can_buy, owned, UiAction::BuyUpgrade(upgrade));
+                        }
+                    });
+
+                    // Column 4: ABILITY UPGRADES
+                    spawn_station_column(cols, "✨ ABILITY UPGRADES", Color::srgb(1.0, 0.85, 0.25), |col| {
+                        for s in 0..3 {
+                            let slot_name = match s {
+                                0 => "Ability 1 [Q]",
+                                1 => "Ability 2 [E]",
+                                _ => "Ultimate [X]",
+                            };
+                            if let Some(ability) = me.kit[s] {
+                                let upgrade = Upgrade::Ability(s as u8);
+                                let cost = upgrade.cost(me);
+                                let can_buy = upgrade.can_purchase(me);
+                                let maxed = upgrade.is_maxed(me);
+                                let current_tier = me.tiers[s];
+                                let title = if maxed {
+                                    format!("{slot_name}: {} (MAX)", ability.name())
+                                } else {
+                                    format!("{slot_name}: {} Mk {}", ability.name(), current_tier + 2)
+                                };
+                                let desc = if maxed { "Max tier reached" } else { "-15% cooldown & boosted power" };
+                                station_card(col, title, desc, cost, can_buy, maxed, UiAction::BuyUpgrade(upgrade));
+                            } else {
+                                let title = format!("{slot_name}: None");
+                                let desc = "Find ability drops in world";
+                                station_card(col, title, desc, 0, false, true, UiAction::Locked);
+                            }
+                        }
+
+                        // Augments for tactical abilities
+                        for s in 0..2 {
+                            if let Some(ability) = me.kit[s] {
+                                let upgrade = Upgrade::Augment(s as u8);
+                                let cost = upgrade.cost(me);
+                                let can_buy = upgrade.can_purchase(me);
+                                let maxed = upgrade.is_maxed(me);
+                                let title = format!("Augment: {} ({}/{})", ability.name(), me.augments[s] + 1, MAX_AUGMENT + 1);
+                                let desc = match ability.augment() {
+                                    Augment::Charges => "+1 ability charge",
+                                    Augment::Copies => "Fires extra copies simultaneously",
+                                };
+                                station_card(col, title, desc, cost, can_buy, maxed, UiAction::BuyUpgrade(upgrade));
+                            }
+                        }
+                    });
+                });
+
+                // Footer
                 p.spawn(text(
-                    format!("LEVEL {} - PICK AN UPGRADE", me.level),
-                    34.0,
-                    ACCENT,
-                ));
-                let left = if me.pending_picks > 1 {
-                    format!("{} picks waiting", me.pending_picks)
-                } else {
-                    "Every 5 levels you get a pick. Levels also add damage.".into()
-                };
-                p.spawn(text(left, 18.0, Color::srgb(0.7, 0.75, 0.85)));
-                for (i, c) in choices.iter().enumerate() {
-                    button_sized(
-                        p,
-                        c.label(me),
-                        UiAction::ChooseUpgrade(i as u8),
-                        Some(460.0),
-                        false,
-                    );
-                }
-                p.spawn(text(
-                    "Esc or B to close (you can pick later)",
-                    15.0,
-                    Color::srgb(0.6, 0.6, 0.7),
+                    "Press [F] or [Esc] to exit terminal",
+                    14.0,
+                    Color::srgb(0.65, 0.7, 0.8),
                 ));
             });
         });
@@ -1873,10 +2184,10 @@ fn end_screen(
                     row_gap: Val::Px(10.0),
                     padding: UiRect::all(Val::Px(28.0)),
                     min_width: Val::Px(500.0),
+                    border_radius: BorderRadius::all(Val::Px(10.0)),
                     ..default()
                 },
                 BackgroundColor(PANEL),
-                BorderRadius::all(Val::Px(10.0)),
             ))
             .with_children(|p| {
                 p.spawn(text(title, 60.0, color));

@@ -47,8 +47,10 @@ pub struct ReplicatedAssets {
     grenade: Handle<StandardMaterial>,
     grenade_mesh: Handle<Mesh>,
     spark: Handle<StandardMaterial>,
-    pickup_meshes: [Handle<Mesh>; 4],
+    pickup_meshes: [Handle<Mesh>; 16],
     pickup_mat: Handle<StandardMaterial>,
+    ability_mesh: Handle<Mesh>,
+    ability_mat: Handle<StandardMaterial>,
     gadget_mat: Handle<StandardMaterial>,
     gadget_glow: Handle<StandardMaterial>,
     /// Ability projectiles by look: (solid, glowing, light colour).
@@ -91,6 +93,38 @@ fn setup(
         pickup_mat: materials.add(StandardMaterial {
             emissive: LinearRgba::rgb(0.25, 0.25, 0.25),
             ..crate::kit::vertex_material(0.4, 0.3)
+        }),
+        ability_mesh: meshes.add({
+            let mut k = crate::kit::Kit::new();
+            let c_outer = crate::kit::c(0.9, 0.95, 1.0);
+            let c_core = crate::kit::c(0.4, 0.7, 1.0);
+            // Faceted crystal / octahedron core + outer facets
+            k.blob(Vec3::ZERO, Vec3::new(0.18, 0.28, 0.18), c_outer);
+            k.cone(Vec3::new(0.0, 0.22, 0.0), 0.14, 0.24, Quat::IDENTITY, c_core);
+            k.cone(
+                Vec3::new(0.0, -0.22, 0.0),
+                0.14,
+                0.24,
+                Quat::from_rotation_x(std::f32::consts::PI),
+                c_core,
+            );
+            for i in 0..4 {
+                let r = Quat::from_rotation_y(i as f32 * std::f32::consts::FRAC_PI_2 + 0.4);
+                k.cuboid_rot(
+                    r * Vec3::new(0.0, 0.0, 0.12),
+                    Vec3::new(0.05, 0.22, 0.05),
+                    r,
+                    c_outer,
+                );
+            }
+            k.build_or_empty()
+        }),
+        ability_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::rgb(0.8, 0.9, 1.0),
+            perceptual_roughness: 0.1,
+            metallic: 0.2,
+            ..default()
         }),
         gadget_mat: materials.add(crate::kit::vertex_material(0.5, 0.3)),
         gadget_glow: materials.add(crate::kit::glow_material(3.0)),
@@ -249,6 +283,160 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
                 );
             }
         }
+        PowerUp::ToxicRounds => {
+            // Biohazard toxin canister: radioactive lime green core with hazard ribbed casing and biohazard valve
+            let dark = c(0.18, 0.2, 0.16);
+            let toxic = c(0.45, 0.95, 0.15);
+            let hazard = c(0.85, 0.85, 0.1);
+            k.cyl(v(0.0, 0.0, 0.0), 0.15, 0.32, Quat::IDENTITY, toxic);
+            k.cyl(v(0.0, 0.18, 0.0), 0.17, 0.06, Quat::IDENTITY, dark);
+            k.cyl(v(0.0, -0.18, 0.0), 0.17, 0.06, Quat::IDENTITY, dark);
+            k.torus(v(0.0, 0.0, 0.0), 0.02, 0.16, Quat::from_rotation_x(FRAC_PI_2), hazard);
+            k.cyl(v(0.0, 0.23, 0.0), 0.06, 0.08, Quat::IDENTITY, dark);
+            k.torus(v(0.0, 0.26, 0.0), 0.015, 0.07, Quat::from_rotation_x(FRAC_PI_2), toxic);
+        }
+        PowerUp::LockAndLoad => {
+            // High-caliber heavy ammo pack / dual extended golden magazines clamped together
+            let gold = c(0.95, 0.75, 0.2);
+            let brass = c(0.8, 0.6, 0.15);
+            let clamp = c(0.15, 0.15, 0.18);
+            for s in [-0.08, 0.08] {
+                k.cuboid(v(s, -0.02, 0.0), v(0.1, 0.34, 0.2), gold);
+                k.cuboid(v(s, 0.16, 0.0), v(0.08, 0.04, 0.16), brass);
+                k.cyl(v(s, 0.20, 0.0), 0.025, 0.06, Quat::IDENTITY, c(0.9, 0.4, 0.15));
+            }
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.28, 0.08, 0.22), clamp);
+            k.cuboid(v(0.0, 0.0, -0.115), v(0.14, 0.04, 0.02), c(1.0, 0.85, 0.3));
+        }
+        PowerUp::CryoRounds => {
+            // Cryogenic coolant battery: frosted cyan crystal capsule with thermal cooling fins
+            let ice = c(0.4, 0.85, 1.0);
+            let steel = c(0.75, 0.82, 0.9);
+            let frost = c(0.9, 0.96, 1.0);
+            k.cyl(v(0.0, 0.0, 0.0), 0.13, 0.30, Quat::IDENTITY, ice);
+            k.cone(v(0.0, 0.22, 0.0), 0.13, 0.14, Quat::IDENTITY, frost);
+            k.cone(v(0.0, -0.22, 0.0), 0.13, 0.14, Quat::from_rotation_x(std::f32::consts::PI), frost);
+            for i in 0..4 {
+                let r = Quat::from_rotation_y(i as f32 * FRAC_PI_2);
+                k.cuboid_rot(r * v(0.14, 0.0, 0.0), v(0.02, 0.24, 0.06), r, steel);
+            }
+        }
+        PowerUp::SuppressingFire => {
+            // Heavy concussion charge: reinforced steel cylinder with blue-white heavy impact plates
+            let steel = c(0.4, 0.45, 0.55);
+            let plating = c(0.7, 0.78, 0.95);
+            let glow_c = c(0.5, 0.7, 1.0);
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.26, 0.26, 0.26), steel);
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.28, 0.20, 0.20), plating);
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.20, 0.28, 0.20), plating);
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.20, 0.20, 0.28), plating);
+            k.blob(v(0.0, 0.0, 0.0), v(0.16, 0.16, 0.16), glow_c);
+        }
+        PowerUp::Quickdraw => {
+            // Speed holster / crimson winged bullets: vibrant racing-red and chrome chevron
+            let red = c(0.95, 0.18, 0.18);
+            let chrome = c(0.9, 0.92, 0.95);
+            let t = Vec2::new(0.05, 0.05);
+            // Dynamic forward chevron / bolt
+            k.beam(v(-0.16, 0.16, 0.0), v(0.0, 0.0, 0.0), t, red);
+            k.beam(v(-0.16, -0.16, 0.0), v(0.0, 0.0, 0.0), t, red);
+            k.beam(v(0.0, 0.16, 0.0), v(0.16, 0.0, 0.0), t, chrome);
+            k.beam(v(0.0, -0.16, 0.0), v(0.16, 0.0, 0.0), t, chrome);
+            k.cyl(v(0.0, 0.0, 0.0), 0.04, 0.28, Quat::from_rotation_z(FRAC_PI_2), c(1.0, 0.4, 0.4));
+        }
+        PowerUp::Executioner => {
+            // Guillotine blade / dark executioner's crimson crescent
+            let dark_iron = c(0.15, 0.12, 0.14);
+            let blood = c(0.75, 0.08, 0.12);
+            k.cuboid(v(0.0, -0.12, 0.0), v(0.28, 0.06, 0.08), dark_iron);
+            // Angled razor wedge
+            k.wedge(v(0.0, 0.04, 0.0), v(0.24, 0.26, 0.06), Quat::IDENTITY, blood);
+            k.beam(v(-0.14, -0.10, 0.0), v(-0.14, 0.18, 0.0), Vec2::new(0.04, 0.04), dark_iron);
+            k.beam(v(0.14, -0.10, 0.0), v(0.14, 0.18, 0.0), Vec2::new(0.04, 0.04), dark_iron);
+            k.cuboid(v(0.0, 0.18, 0.0), v(0.32, 0.04, 0.06), dark_iron);
+        }
+        PowerUp::AutoLoader => {
+            // Infinite belt feed drum: cyan / teal motorized revolving spool
+            let cyan = c(0.25, 0.85, 0.95);
+            let steel = c(0.35, 0.4, 0.45);
+            let brass = c(0.85, 0.7, 0.2);
+            k.cyl(v(0.0, 0.0, 0.0), 0.18, 0.18, Quat::from_rotation_x(FRAC_PI_2), steel);
+            k.torus(v(0.0, 0.0, 0.0), 0.025, 0.17, Quat::IDENTITY, cyan);
+            for i in 0..6 {
+                let a = i as f32 * std::f32::consts::TAU / 6.0;
+                k.cyl(
+                    v(a.cos() * 0.11, a.sin() * 0.11, 0.0),
+                    0.02,
+                    0.19,
+                    Quat::from_rotation_x(FRAC_PI_2),
+                    brass,
+                );
+            }
+        }
+        PowerUp::ShockRounds => {
+            // High-voltage capacitor / lightning spark battery
+            let elec = c(0.45, 0.75, 1.0);
+            let insulator = c(0.2, 0.2, 0.25);
+            let copper = c(0.9, 0.55, 0.25);
+            k.cyl(v(0.0, 0.0, 0.0), 0.12, 0.28, Quat::IDENTITY, elec);
+            for y in [-0.08, 0.0, 0.08] {
+                k.torus(v(0.0, y, 0.0), 0.018, 0.13, Quat::from_rotation_x(FRAC_PI_2), insulator);
+            }
+            // Spark prongs
+            k.cyl(v(-0.06, 0.18, 0.0), 0.015, 0.12, Quat::IDENTITY, copper);
+            k.cyl(v(0.06, 0.18, 0.0), 0.015, 0.12, Quat::IDENTITY, copper);
+            k.blob(v(0.0, 0.22, 0.0), v(0.06, 0.06, 0.06), c(0.8, 0.9, 1.0));
+        }
+        PowerUp::DragonsBreath => {
+            // Incendiary dragon canister: blazing magma shell with flame vents
+            let magma = c(1.0, 0.35, 0.05);
+            let dark_char = c(0.16, 0.1, 0.08);
+            let gold = c(0.95, 0.7, 0.15);
+            k.blob(v(0.0, 0.0, 0.0), v(0.18, 0.26, 0.18), magma);
+            k.cyl(v(0.0, -0.15, 0.0), 0.14, 0.08, Quat::IDENTITY, dark_char);
+            k.cone(v(0.0, 0.18, 0.0), 0.15, 0.18, Quat::IDENTITY, gold);
+            for i in 0..3 {
+                let a = i as f32 * std::f32::consts::TAU / 3.0;
+                k.cuboid_rot(
+                    v(a.cos() * 0.16, 0.0, a.sin() * 0.16),
+                    v(0.03, 0.20, 0.03),
+                    Quat::from_rotation_y(a),
+                    dark_char,
+                );
+            }
+        }
+        PowerUp::Overheat => {
+            // Superheated reactor core / glowing orange heat-sink coil
+            let core = c(1.0, 0.55, 0.1);
+            let steel = c(0.3, 0.25, 0.25);
+            k.cyl(v(0.0, 0.0, 0.0), 0.12, 0.32, Quat::IDENTITY, core);
+            for i in 0..5 {
+                let y = -0.12 + i as f32 * 0.06;
+                k.torus(v(0.0, y, 0.0), 0.018, 0.16, Quat::from_rotation_x(FRAC_PI_2), steel);
+            }
+            k.blob(v(0.0, 0.0, 0.0), v(0.16, 0.16, 0.16), c(1.0, 0.8, 0.2));
+        }
+        PowerUp::SoulSiphon => {
+            // Vampiric spectral urn / emerald soul chalice
+            let jade = c(0.25, 0.95, 0.7);
+            let obsidian = c(0.12, 0.14, 0.16);
+            k.frustum(v(0.0, -0.05, 0.0), 0.16, 0.08, 0.22, Quat::IDENTITY, obsidian);
+            k.blob(v(0.0, 0.08, 0.0), v(0.14, 0.16, 0.14), jade);
+            k.torus(v(0.0, 0.06, 0.0), 0.02, 0.17, Quat::from_rotation_x(FRAC_PI_2), obsidian);
+            k.cone(v(0.0, 0.22, 0.0), 0.08, 0.12, Quat::IDENTITY, jade);
+        }
+        PowerUp::Overcharge => {
+            // Arcane lightning arc orb: violet/white surge sphere with orbiting power conductors
+            let surge = c(0.7, 0.65, 1.0);
+            let white_core = c(0.95, 0.95, 1.0);
+            let pylon = c(0.2, 0.18, 0.3);
+            k.sphere(v(0.0, 0.0, 0.0), 0.14, white_core);
+            for i in 0..3 {
+                let r = Quat::from_rotation_x(i as f32 * 1.05) * Quat::from_rotation_y(i as f32 * 1.05);
+                k.torus(v(0.0, 0.0, 0.0), 0.015, 0.19, r, surge);
+            }
+            k.cuboid(v(0.0, 0.0, 0.0), v(0.06, 0.32, 0.06), pylon);
+        }
     }
     k
 }
@@ -380,7 +568,7 @@ fn dress(
     match kind {
         NetKind::Grunt | NetKind::Shooter | NetKind::Brute | NetKind::Boss(_) => {
             let model = match kind {
-                NetKind::Grunt => Model::Walker((root.index() % 3) as u8),
+                NetKind::Grunt => Model::Walker((root.index().index() % 3) as u8),
                 NetKind::Shooter => Model::Spitter,
                 _ => Model::Brute,
             };
@@ -442,6 +630,7 @@ fn dress(
                     Mesh3d(assets.grenade_mesh.clone()),
                     MeshMaterial3d(assets.grenade.clone()),
                     Transform::from_scale(Vec3::splat(1.8)),
+                    Visibility::default(),
                 ))
                 .with_children(|g| {
                     // Burning fuse.
@@ -486,6 +675,7 @@ fn dress(
                     Mesh3d(solid),
                     MeshMaterial3d(assets.gadget_mat.clone()),
                     Transform::default(),
+                    Visibility::default(),
                 ));
                 if thrown {
                     e.insert(Toss::default());
@@ -529,12 +719,18 @@ fn dress(
             let (solid, glowing) = assets.wraith.clone();
             commands.entity(root).with_children(|p| {
                 p.spawn((
-                    Hover((root.index() % 7) as f32),
+                    Hover((root.index().index() % 7) as f32),
                     Mesh3d(solid),
                     MeshMaterial3d(assets.gadget_mat.clone()),
                     Transform::default(),
+                    Visibility::default(),
                 ))
-                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                .with_child((
+                    Mesh3d(glowing),
+                    MeshMaterial3d(assets.gadget_glow.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                ));
                 p.spawn((
                     PointLight {
                         intensity: 25_000.0,
@@ -553,8 +749,14 @@ fn dress(
                     Mesh3d(solid),
                     MeshMaterial3d(assets.gadget_mat.clone()),
                     Transform::default(),
+                    Visibility::default(),
                 ))
-                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                .with_child((
+                    Mesh3d(glowing),
+                    MeshMaterial3d(assets.gadget_glow.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                ));
                 for (i, at) in projectiles::rotor_spots().into_iter().enumerate() {
                     let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
                     p.spawn((
@@ -577,10 +779,15 @@ fn dress(
         }
         NetKind::PowerUp(kind) => {
             let i = PowerUp::ALL.iter().position(|p| *p == kind).unwrap_or(0);
+            let mesh = assets
+                .pickup_meshes
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| assets.pickup_meshes[0].clone());
             commands.entity(root).with_children(|p| {
                 p.spawn((
                     Spin,
-                    Mesh3d(assets.pickup_meshes[i].clone()),
+                    Mesh3d(mesh),
                     MeshMaterial3d(assets.pickup_mat.clone()),
                     Transform::default(),
                 ));
@@ -589,6 +796,30 @@ fn dress(
                         intensity: 30_000.0,
                         color: kind.color(),
                         range: 5.0,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.8, 0.0),
+                ));
+            });
+        }
+        NetKind::AbilityDrop(id) => {
+            let ability = crate::data::Ability::ALL
+                .get(id as usize)
+                .copied()
+                .unwrap_or(crate::data::Ability::ShieldCharge);
+            commands.entity(root).with_children(|p| {
+                p.spawn((
+                    Spin,
+                    Hover(0.0),
+                    Mesh3d(assets.ability_mesh.clone()),
+                    MeshMaterial3d(assets.ability_mat.clone()),
+                    Transform::default(),
+                ));
+                p.spawn((
+                    PointLight {
+                        intensity: 35_000.0,
+                        color: ability.color(),
+                        range: 6.0,
                         ..default()
                     },
                     Transform::from_xyz(0.0, 0.8, 0.0),
@@ -648,7 +879,7 @@ fn enemy_colors(
             .get(&look.0)
             .is_some_and(|m| m.base_color == tint && m.emissive == glow);
         if !same {
-            if let Some(m) = materials.get_mut(&look.0) {
+            if let Some(mut m) = materials.get_mut(&look.0) {
                 m.base_color = tint;
                 m.emissive = glow;
             }
@@ -820,7 +1051,7 @@ fn sync_avatars(
                 NameTag,
                 Text::new(p.name.clone()),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 15.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgb(0.7, 0.9, 1.0)),

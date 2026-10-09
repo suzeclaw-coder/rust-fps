@@ -9,22 +9,25 @@
 // The shader-type derive generates layout checks that are never called.
 #![allow(dead_code)]
 
-use bevy::asset::{weak_handle, RenderAssetUsages};
-use bevy::pbr::{MaterialPipeline, MaterialPipelineKey, NotShadowCaster, NotShadowReceiver};
+use bevy::asset::{uuid_handle, RenderAssetUsages};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, ShaderRef, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
+use bevy::shader::ShaderRef;
 use std::collections::HashMap;
 
+use crate::maps::CurrentMap;
 use crate::physics::{collect_boxes, ray_world};
 use crate::player::LocalPlayer;
 use crate::rig::Rig;
 use crate::sim::{slam_spec, FIREBALL_SPEED};
 use crate::{AppState, Collider, EnemyStatus, NetKind, Phase, Replicated};
 
-const SHADER: Handle<Shader> = weak_handle!("6c1d8e52-3f7a-4b90-a2e4-5d9c0b7f1e38");
+const SHADER: Handle<Shader> = uuid_handle!("6c1d8e52-3f7a-4b90-a2e4-5d9c0b7f1e38");
 
 /// Ability previews: a muted blue-grey, so they don't shout.
 pub const PREVIEW: Color = Color::srgb(0.55, 0.75, 0.85);
@@ -140,7 +143,7 @@ impl Material for MarkerMaterial {
         40.0
     }
     fn specialize(
-        _pipeline: &MaterialPipeline<Self>,
+        _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
@@ -161,7 +164,8 @@ pub struct MarkersPlugin;
 
 impl Plugin for MarkersPlugin {
     fn build(&self, app: &mut App) {
-        app.world_mut()
+        let _ = app
+            .world_mut()
             .resource_mut::<Assets<Shader>>()
             .insert(SHADER.id(), Shader::from_wgsl(WGSL, "markers.wgsl"));
         app.add_plugins(MaterialPlugin::<MarkerMaterial>::default())
@@ -170,7 +174,7 @@ impl Plugin for MarkersPlugin {
             .add_systems(Startup, make_quad)
             .add_systems(
                 Update,
-                enemy_warnings
+                (enemy_warnings, station_markers)
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
             )
@@ -242,7 +246,7 @@ fn draw(
             Shape::Cone { radius, half_angle } => (2.0, radius, half_angle),
             Shape::Line { length, half_width } => (3.0, length, half_width),
         };
-        if let Some(mat) = mats.get_mut(mat) {
+        if let Some(mut mat) = mats.get_mut(mat) {
             mat.params = MarkerParams {
                 color: m.color.to_linear().to_vec4(),
                 kind,
@@ -343,6 +347,36 @@ fn enemy_warnings(
     }
 }
 
+/// Renders in-world holographic ground markers beneath each upgrade station
+/// highlighting the interactive zone for players.
+fn station_markers(
+    time: Res<Time>,
+    mut markers: ResMut<Markers>,
+    map: Option<Res<CurrentMap>>,
+) {
+    let Some(map) = map else { return };
+    let t = time.elapsed_secs();
+    let pulse = 0.5 + 0.5 * (t * 2.5).sin();
+    for &pos in &map.0.upgrade_stations {
+        // High-tech station decal on the ground:
+        // Outer interactive boundary ring (near_upgrade_station is 3.0m)
+        markers.push(Marker::new(
+            pos,
+            Shape::Donut {
+                inner: 2.7,
+                outer: 2.9 + 0.1 * pulse,
+            },
+            Color::srgba(0.1, 0.85, 1.0, 0.75),
+        ));
+        // Inner glowing core circle
+        markers.push(Marker::new(
+            pos,
+            Shape::Circle { radius: 1.1 },
+            Color::srgba(0.15, 0.75, 0.95, 0.4),
+        ));
+    }
+}
+
 const WGSL: &str = r#"
 #import bevy_pbr::forward_io::VertexOutput
 
@@ -358,7 +392,7 @@ struct MarkerParams {
     level: f32,
 }
 
-@group(2) @binding(0) var<uniform> marker: MarkerParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> marker: MarkerParams;
 
 // Distance to a wedge of radius r opening `ang` either side of +y.
 fn sd_cone(p_in: vec2<f32>, r: f32, ang: f32) -> f32 {

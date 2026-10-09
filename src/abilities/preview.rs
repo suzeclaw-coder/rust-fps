@@ -150,7 +150,9 @@ pub fn draw_previews(
     let Some(me) = roster.me(&session) else {
         return;
     };
-    let ability = me.kit[slot as usize];
+    let Some(ability) = me.kit[slot as usize] else {
+        return;
+    };
     let (cam, p) = player.into_inner();
     let t = time.elapsed_secs();
     let tier = me.tiers[slot as usize] as f32;

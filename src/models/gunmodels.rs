@@ -11,7 +11,7 @@
 //! - `pump`: a shotgun's sliding forend.
 //! The `GunRig` says where the hands go and where the muzzle is.
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -222,7 +222,13 @@ pub fn spawn_gun(
     let glow_mat = assets.glow_mat.id();
     let mut part = |mesh: &Handle<Mesh>, mat: Handle<StandardMaterial>, tf: Transform, tag: u8| {
         let solid = tag != 3 && mat.id() != glow_mat;
-        let mut e = parent.spawn((GunPart, Mesh3d(mesh.clone()), MeshMaterial3d(mat), tf));
+        let mut e = parent.spawn((
+            GunPart,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat),
+            tf,
+            Visibility::default(),
+        ));
         if no_shadow {
             e.insert(NotShadowCaster);
         }

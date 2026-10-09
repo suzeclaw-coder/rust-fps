@@ -85,7 +85,7 @@ fn left(p: &mut ChildSpawnerCommands, state: &MatchState, tools: &Tools) {
             r.spawn((
                 Text::new(slot.name()),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: 14.0.into(),
                     ..default()
                 },
                 TextColor(DIM),

@@ -99,6 +99,7 @@ pub struct MapLayout {
     pub doors: Vec<DoorDef>,
     pub wall_buys: Vec<WallBuy>,
     pub indoor_areas: Vec<[f32; 4]>,
+    pub upgrade_stations: Vec<Vec3>,
 }
 
 impl MapLayout {
@@ -122,7 +123,12 @@ impl MapLayout {
             doors: Vec::new(),
             wall_buys: Vec::new(),
             indoor_areas: Vec::new(),
+            upgrade_stations: Vec::new(),
         }
+    }
+
+    pub fn near_upgrade_station(&self, pos: Vec3) -> bool {
+        self.upgrade_stations.iter().any(|&s| pos.distance(s) < 3.0)
     }
 
     /// Tests if a 3D position is inside any enclosed roofed building or room.
@@ -229,6 +235,7 @@ fn shipping_yard() -> MapLayout {
     m.perk(2, 47.0, -42.5, 0.0);
     m.perk(3, -8.9, 23.0, FRAC_PI_2);
     m.perk(4, 56.0, 30.0, -FRAC_PI_2);
+    m.upgrade_stations = vec![v(7.5, 0.0, 1.0), v(0.0, 0.0, 36.0)];
     m.boundary(0, 4.5);
 
     let hall = look(Finish::Block, c(0.8, 0.77, 0.68), c(0.22, 0.3, 0.38));
@@ -647,6 +654,7 @@ fn central_park() -> MapLayout {
     m.perk(2, 40.0, -56.9, 0.0);
     m.perk(3, -57.0, -5.0, FRAC_PI_2);
     m.perk(4, -26.9, 50.5, -FRAC_PI_2);
+    m.upgrade_stations = vec![v(6.0, 0.0, -50.0), v(0.0, 0.0, -28.0)];
     m.boundary(1, 3.0);
     m.skyline(OUTER, 3.0);
 
@@ -1084,6 +1092,7 @@ fn neighborhood() -> MapLayout {
     m.perk(2, -56.9, -21.0, FRAC_PI_2);
     m.perk(3, -31.0, 29.0, -FRAC_PI_2);
     m.perk(4, 11.2, 40.0, -FRAC_PI_2);
+    m.upgrade_stations = vec![v(-2.0, 0.0, -11.0), v(0.0, 0.0, 5.0)];
     m.boundary(2, 2.2);
 
     let home = look(Finish::Siding, c(0.6, 0.72, 0.85), c(0.95, 0.95, 0.92));
@@ -1520,6 +1529,9 @@ pub struct PerkMachine(pub Perk);
 
 #[derive(Component)]
 pub struct ExtractionBeacon;
+
+#[derive(Component)]
+pub struct UpgradeStation;
 
 /// The mystery box lid (hinged at the back edge).
 #[derive(Component)]
@@ -1970,6 +1982,7 @@ fn art_meshes(
                 Mesh3d(meshes.add(mesh)),
                 MeshMaterial3d(mat.clone()),
                 Transform::default(),
+                Visibility::default(),
             ));
             // The marker also learns if this is a solid part (not glow or glass).
             marker(&mut e, i < 2);
@@ -2057,7 +2070,7 @@ pub fn spawn_map(
                     Mesh3d(meshes.add(Cuboid::new(s.size.x + 0.08, 0.12, s.size.z + 0.08))),
                     MeshMaterial3d(grime_mat.clone()),
                     Transform::from_xyz(s.pos.x, 0.06, s.pos.z),
-                    bevy::pbr::NotShadowCaster,
+                    bevy::light::NotShadowCaster,
                 ));
             }
         }
@@ -2090,7 +2103,7 @@ pub fn spawn_map(
                 Mesh3d(meshes.add(Plane3d::default().mesh().size(sx, sz).build())),
                 MeshMaterial3d(puddle_mat.clone()),
                 Transform::from_translation(*spot).with_rotation(rot),
-                bevy::pbr::NotShadowCaster,
+                bevy::light::NotShadowCaster,
             ));
         }
     }
@@ -2119,7 +2132,7 @@ pub fn spawn_map(
                 intensity: *intensity * lamp,
                 color: *color,
                 range: reach,
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_translation(*pos),
@@ -2143,8 +2156,8 @@ pub fn spawn_map(
                 Mesh3d(ray_mesh.clone()),
                 MeshMaterial3d(god_ray_mat.clone()),
                 Transform::from_xyz(pos.x, h * 0.5, pos.z).with_scale(Vec3::new(1.0 + h * 0.2, h / 6.0, 1.0 + h * 0.2)),
-                bevy::pbr::NotShadowCaster,
-                bevy::pbr::NotShadowReceiver,
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
             ));
         }
     }
@@ -2162,7 +2175,7 @@ pub fn spawn_map(
         DirectionalLight {
             illuminance: sun,
             color: sun_color,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y),
@@ -2174,7 +2187,7 @@ pub fn spawn_map(
             DirectionalLight {
                 illuminance: layout.sun * FILL,
                 color: Color::srgb(0.82, 0.87, 1.0),
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_xyz(-20.0, 30.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -2269,7 +2282,7 @@ pub fn spawn_map(
                     ..default()
                 })),
                 Transform::from_xyz(0.0, 60.5, 0.0),
-                bevy::pbr::NotShadowCaster,
+                bevy::light::NotShadowCaster,
             ))
             .id(),
         commands
@@ -2284,7 +2297,7 @@ pub fn spawn_map(
                     ..default()
                 })),
                 Transform::from_xyz(0.0, 60.5, 0.0),
-                bevy::pbr::NotShadowCaster,
+                bevy::light::NotShadowCaster,
             ))
             .id(),
         commands
@@ -2342,8 +2355,55 @@ pub fn spawn_map(
             ));
         });
 
+    strips::spawn_upgrade_stations(commands, meshes, materials, &layout);
+
     layout
 }
 
 pub const EXTRACT_RADIUS: f32 = 4.0;
 pub const BOX_HALF: Vec3 = Vec3::new(0.9, 0.45, 0.45);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upgrade_station_contract() {
+        let m = MapLayout::new(Color::BLACK, Ground::Asphalt, Color::WHITE, 1000.0);
+        assert!(m.upgrade_stations.is_empty());
+        assert!(!m.near_upgrade_station(Vec3::ZERO));
+
+        for map_id in 0..3 {
+            let layout = layout(map_id);
+            assert!(
+                !layout.upgrade_stations.is_empty() && layout.upgrade_stations.len() <= 2,
+                "Map {} should have 1 or 2 upgrade stations, found {}",
+                map_id,
+                layout.upgrade_stations.len()
+            );
+
+            // Test near_upgrade_station helper
+            for &station in &layout.upgrade_stations {
+                assert!(layout.near_upgrade_station(station));
+                assert!(layout.near_upgrade_station(station + Vec3::new(1.5, 0.0, 0.0)));
+                assert!(layout.near_upgrade_station(station + Vec3::new(2.8, 0.0, 0.0)));
+                assert!(!layout.near_upgrade_station(station + Vec3::new(3.5, 0.0, 0.0)));
+            }
+
+            // Verify proximity to player spawn (at least one station within reasonable hub distance)
+            let spawn = layout.player_spawns[0];
+            let min_dist = layout
+                .upgrade_stations
+                .iter()
+                .map(|&s| spawn.distance(s))
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                min_dist < 20.0,
+                "Map {} upgrade station should be reasonably near spawn (dist: {})",
+                map_id,
+                min_dist
+            );
+        }
+    }
+}
+

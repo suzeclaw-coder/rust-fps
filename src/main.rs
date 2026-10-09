@@ -47,7 +47,7 @@ mod weapons;
 mod zombies;
 
 use bevy::prelude::*;
-use bevy::window::CursorGrabMode;
+use bevy::window::{CursorGrabMode, CursorOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -62,7 +62,7 @@ pub const CROUCH_EYE_HEIGHT: f32 = 1.0;
 pub const PLAYER_RADIUS: f32 = 0.4;
 pub const BASE_HEALTH: f32 = 100.0;
 pub const MAX_PLAYERS: usize = 8;
-pub const START_POINTS: u32 = 500;
+pub const START_POINTS: u32 = 0;
 
 // ---------------------------------------------------------------------------
 // App states
@@ -134,8 +134,8 @@ pub struct PlayerInfo {
     pub id: u8,
     pub name: String,
     pub character: Character,
-    /// The two abilities and the ultimate this player brought.
-    pub kit: [data::Ability; 3],
+    /// The two abilities and the ultimate this player has equipped in-game.
+    pub kit: [Option<data::Ability>; 3],
     /// Their level with this character (shown in the party).
     pub char_level: u8,
     pub skin: u8,
@@ -220,16 +220,15 @@ impl PlayerInfo {
     }
 
     pub fn new(id: u8, name: String, character: Character, skin: u8) -> Self {
-        let dg = character.default_guns();
         Self {
             id,
             name,
             character,
-            kit: character.default_kit(),
+            kit: [None, None, None],
             char_level: 1,
             skin,
             gun_skins: Vec::new(),
-            class_guns: [(dg[0], data::Attach::NONE), (dg[1], data::Attach::NONE)],
+            class_guns: [(0, data::Attach::NONE), (0, data::Attach::NONE)],
             ready: false,
             pos: [0.0; 3],
             yaw: 0.0,
@@ -241,10 +240,10 @@ impl PlayerInfo {
             health: BASE_HEALTH,
             alive: true,
             spawn_seq: 0,
-            points: START_POINTS,
+            points: 0,
             score: 0,
             kills: 0,
-            guns: [Some(dg[0]), Some(dg[1])],
+            guns: [Some(0), None],
             gun_tiers: [0; 2],
             attach: [data::Attach::NONE; 2],
             active_slot: 0,
@@ -278,11 +277,11 @@ impl PlayerInfo {
     pub fn reset_for_match(&mut self) {
         let mut keep = PlayerInfo::new(self.id, self.name.clone(), self.character, self.skin);
         keep.gun_skins = std::mem::take(&mut self.gun_skins);
-        keep.kit = self.kit;
+        keep.kit = [None, None, None];
         keep.char_level = self.char_level;
-        keep.class_guns = self.class_guns;
-        keep.guns = [Some(self.class_guns[0].0), Some(self.class_guns[1].0)];
-        keep.attach = [self.class_guns[0].1, self.class_guns[1].1];
+        keep.class_guns = [(0, data::Attach::NONE), (0, data::Attach::NONE)];
+        keep.guns = [Some(0), None];
+        keep.attach = [data::Attach::NONE; 2];
         let seq = self.spawn_seq;
         let ack = self.action_ack;
         *self = keep;
@@ -293,15 +292,15 @@ impl PlayerInfo {
 
     /// Uses of ability `slot` that can be stored up.
     pub fn max_charges(&self, slot: usize) -> u8 {
-        match self.kit[slot].augment() {
-            data::Augment::Charges => 1 + self.augments[slot],
-            data::Augment::Copies => 1,
+        match self.kit.get(slot).and_then(|a| *a).map(|a| a.augment()) {
+            Some(data::Augment::Charges) => 1 + self.augments[slot],
+            _ => 1,
         }
     }
 
     /// Copies each cast of ability `slot` makes.
     pub fn copies(&self, slot: usize) -> u8 {
-        match self.kit.get(slot).map(|a| a.augment()) {
+        match self.kit.get(slot).and_then(|a| *a).map(|a| a.augment()) {
             Some(data::Augment::Copies) if slot < 2 => 1 + self.augments[slot],
             _ => 1,
         }
@@ -310,7 +309,10 @@ impl PlayerInfo {
     /// Ability cooldown for `slot` with the Focus stat.
     pub fn ability_cooldown(&self, slot: usize) -> f32 {
         let focus = 1.0 - self.stat(data::Stat::Focus) * data::Stat::Focus.per_stack();
-        self.kit[slot].cooldown(self.tiers[slot]) * focus
+        self.kit
+            .get(slot)
+            .and_then(|a| *a)
+            .map_or(10.0, |a| a.cooldown(self.tiers[slot]) * focus)
     }
 
     /// What the running weapon ability does to shots right now.
@@ -414,6 +416,10 @@ pub struct MatchState {
     /// Last power-up grabbed, for the on-screen banner.
     pub powerup_seq: u32,
     pub last_powerup: Option<data::PowerUp>,
+    /// Objective and round completion reward tracking.
+    pub objective_seq: u32,
+    pub objective_reward: u32,
+    pub objective_announcement: String,
 
     pub box_spot: u8,
     pub box_state: BoxState,
@@ -510,6 +516,8 @@ pub enum PlayerAction {
         charge: f32,
     },
     Choose(u8),
+    /// Purchase an upgrade from the Upgrade Station.
+    BuyUpgrade(Upgrade),
     /// Use weapon ability 0 or 1 (keys 3 and 4).
     WeaponAbility(u8),
     /// Mark a spot (or an enemy by net id; u32::MAX for none).
@@ -546,6 +554,8 @@ pub enum NetKind {
     Drone,
     /// One of the Revenant's spectral warriors.
     Wraith,
+    /// An in-world ability drop orb that equips to Q/E/R when walked over.
+    AbilityDrop(u8),
 }
 
 impl NetKind {
@@ -605,17 +615,17 @@ pub enum Phase {
     Present,
 }
 
-pub fn cursor_locked(window: &Window) -> bool {
-    window.cursor_options.grab_mode != CursorGrabMode::None
+pub fn cursor_locked(cursor: &CursorOptions) -> bool {
+    cursor.grab_mode != CursorGrabMode::None
 }
 
-pub fn set_cursor_lock(window: &mut Window, locked: bool) {
-    window.cursor_options.grab_mode = if locked {
+pub fn set_cursor_lock(cursor: &mut CursorOptions, locked: bool) {
+    cursor.grab_mode = if locked {
         CursorGrabMode::Locked
     } else {
         CursorGrabMode::None
     };
-    window.cursor_options.visible = !locked;
+    cursor.visible = !locked;
 }
 
 /// Solo games pause while a menu is open; hosted games keep running.
@@ -645,7 +655,7 @@ fn main() {
     }))
     .init_state::<AppState>()
     .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.09)))
-    .insert_resource(AmbientLight {
+    .insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 350.0,
         ..default()

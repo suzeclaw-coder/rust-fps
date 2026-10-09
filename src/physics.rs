@@ -620,7 +620,7 @@ mod tests {
         let colliders: Boxes = vec![(Vec3::new(0.0, 1.0, 2.0), Vec3::new(2.0, 1.0, 0.1))];
         let origin = Vec3::new(0.0, 1.2, 0.0);
         let dir = Vec3::Z;
-        let enemy_entity = Entity::from_raw(1);
+        let enemy_entity = Entity::from_raw_u32(1).unwrap();
         let enemy_feet = Vec3::new(0.0, 0.0, 5.0);
         let enemies = vec![(enemy_entity, enemy_feet, 1.0, false)];
 
@@ -638,7 +638,7 @@ mod tests {
         let colliders: Boxes = vec![(Vec3::new(0.0, 1.0, 2.0), Vec3::new(2.0, 1.0, 0.6))];
         let origin = Vec3::new(0.0, 1.2, 0.0);
         let dir = Vec3::Z;
-        let enemy_entity = Entity::from_raw(1);
+        let enemy_entity = Entity::from_raw_u32(1).unwrap();
         let enemy_feet = Vec3::new(0.0, 0.0, 5.0);
         let enemies = vec![(enemy_entity, enemy_feet, 1.0, false)];
 
@@ -659,7 +659,7 @@ mod tests {
         ];
         let origin = Vec3::new(0.0, 1.2, 0.0);
         let dir = Vec3::Z;
-        let enemy_entity = Entity::from_raw(1);
+        let enemy_entity = Entity::from_raw_u32(1).unwrap();
         let enemy_feet = Vec3::new(0.0, 0.0, 5.0);
         let enemies = vec![(enemy_entity, enemy_feet, 1.0, false)];
 

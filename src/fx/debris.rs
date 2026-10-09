@@ -3,7 +3,7 @@
 //! Spawns tumbling 3D physical cube/shard debris entities at blast origins that scatter,
 //! arc under gravity, bounce off the floor with restitution and ground friction, and settle.
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 

@@ -10,7 +10,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use std::f32::consts::PI;
@@ -487,6 +487,7 @@ fn rebuild(
                     Mesh3d(arm.clone()),
                     MeshMaterial3d(rig.skin_mat.clone()),
                     Transform::default(),
+                    Visibility::default(),
                     NotShadowCaster,
                 ));
             });
@@ -651,8 +652,8 @@ fn animate(
     anim.bob += dt * (4.0 + speed * 1.2).min(16.0) * amp.min(1.0);
 
     // Is the left hand busy with an ability?
-    let ab = |slot: u8| me.kit[slot as usize];
-    let style_of = |slot: u8| ab(slot).style();
+    let ab = |slot: u8| me.kit.get(slot as usize).copied().flatten();
+    let style_of = |slot: u8| ab(slot).map_or(CastStyle::Move, |a| a.style());
     let blade = |slot: u8| style_of(slot) == CastStyle::Sword;
     let anim_len = |slot: u8| if blade(slot) { 0.7 } else { 0.55 };
     let cast_anim = game.cast.cast.filter(|(slot, s)| *s < anim_len(*slot));
@@ -1019,16 +1020,16 @@ fn animate(
         let style = style_of(slot);
         let ready = at(Vec3::new(-0.13, -0.13, -0.32), Quat::from_rotation_x(0.15));
         let ability = ab(slot);
-        let color = ability.color();
+        let color = ability.map_or(Color::WHITE, |a| a.color());
         // What the hand holds for this ability, if anything.
         let thing = match ability {
-            Ability::HealingGrenade => Some(Prop::Missile(look::MEDKIT)),
-            Ability::StickyBomb => Some(Prop::Missile(look::STICKY)),
-            Ability::AcidFlask => Some(Prop::Missile(look::FLASK)),
-            Ability::BearTrap => Some(Prop::Missile(look::TRAP)),
-            Ability::Claymore => Some(Prop::Missile(look::CLAYMORE)),
-            Ability::NeurotoxinDart => Some(Prop::Missile(look::DART)),
-            Ability::MedDrone => Some(Prop::Drone),
+            Some(Ability::HealingGrenade) => Some(Prop::Missile(look::MEDKIT)),
+            Some(Ability::StickyBomb) => Some(Prop::Missile(look::STICKY)),
+            Some(Ability::AcidFlask) => Some(Prop::Missile(look::FLASK)),
+            Some(Ability::BearTrap) => Some(Prop::Missile(look::TRAP)),
+            Some(Ability::Claymore) => Some(Prop::Missile(look::CLAYMORE)),
+            Some(Ability::NeurotoxinDart) => Some(Prop::Missile(look::DART)),
+            Some(Ability::MedDrone) => Some(Prop::Drone),
             _ => None,
         };
         let mut hand = ready;
@@ -1300,7 +1301,7 @@ fn animate(
             Prop::Orb => {
                 if let Some((color, size)) = orb {
                     tf.scale = Vec3::splat(size);
-                    if let Some(m) = materials.get_mut(&rig_assets.orb_mat) {
+                    if let Some(mut m) = materials.get_mut(&rig_assets.orb_mat) {
                         m.base_color = color.with_alpha(0.85);
                     }
                 }
@@ -1325,7 +1326,7 @@ fn animate(
         .map(|(c, k)| LinearRgba::from(c) * k * (0.2 + 0.08 * (t * 7.0).sin()));
     if glow.is_some() || anim.glowing {
         anim.glowing = glow.is_some();
-        if let Some(m) = materials.get_mut(&rig_assets.skin_mat) {
+        if let Some(mut m) = materials.get_mut(&rig_assets.skin_mat) {
             m.emissive = glow.unwrap_or(LinearRgba::BLACK);
         }
     }

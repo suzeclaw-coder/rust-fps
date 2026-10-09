@@ -39,7 +39,6 @@ pub enum Action {
     WeaponAbility1,
     WeaponAbility2,
     SwapWeapon,
-    Upgrades,
     Scoreboard,
     Emote,
     Ping,
@@ -48,7 +47,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 21] = [
+    pub const ALL: [Action; 20] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -64,7 +63,6 @@ impl Action {
         Action::WeaponAbility1,
         Action::WeaponAbility2,
         Action::SwapWeapon,
-        Action::Upgrades,
         Action::Scoreboard,
         Action::Emote,
         Action::Ping,
@@ -89,7 +87,6 @@ impl Action {
             Action::WeaponAbility1 => "Weapon ability 1",
             Action::WeaponAbility2 => "Weapon ability 2",
             Action::SwapWeapon => "Swap weapon",
-            Action::Upgrades => "Pick level-up upgrade",
             Action::Scoreboard => "Scoreboard",
             Action::Emote => "Emotes",
             Action::Ping => "Ping",
@@ -115,7 +112,6 @@ impl Action {
             Action::WeaponAbility1 => KeyCode::Digit3,
             Action::WeaponAbility2 => KeyCode::Digit4,
             Action::SwapWeapon => KeyCode::KeyT,
-            Action::Upgrades => KeyCode::KeyB,
             Action::Scoreboard => KeyCode::Tab,
             Action::Emote => KeyCode::KeyG,
             Action::Ping => KeyCode::KeyZ,
@@ -356,7 +352,9 @@ pub struct Profile {
     pub last_address: String,
     /// Career experience from every match (see progression.rs).
     pub career_xp: u32,
-    /// Each class's chosen guns (primary, secondary).
+    /// Universal loadout: primary and secondary gun choices.
+    pub loadout_guns: [u8; 2],
+    /// Each class's chosen guns (for backwards compatibility).
     pub class_guns: HashMap<Character, [u8; 2]>,
     /// Attachments picked for each gun (by gun id).
     pub gun_attach: HashMap<u8, u8>,
@@ -383,6 +381,7 @@ impl Default for Profile {
             extractions: 0,
             last_address: String::new(),
             career_xp: 0,
+            loadout_guns: crate::data::DEFAULT_LOADOUT_GUNS,
             class_guns: HashMap::new(),
             gun_attach: HashMap::new(),
             char_xp: HashMap::new(),
@@ -392,23 +391,28 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// A class's guns (primary, secondary) and their attachments, falling
-    /// back to the first choices for anything not picked or not unlocked.
-    pub fn class_loadout(&self, c: Character) -> [(u8, crate::data::Attach); 2] {
+    /// The player's universal starting guns (primary, secondary) and their attachments.
+    pub fn loadout(&self) -> [(u8, crate::data::Attach); 2] {
         let level = crate::progression::career(self.career_xp).0;
-        let defaults = c.default_guns();
-        let picked = self.class_guns.get(&c).copied().unwrap_or(defaults);
-        std::array::from_fn(|slot| {
-            let gun = if c.has_gun(slot, picked[slot])
-                && crate::progression::gun_unlocked(level, picked[slot])
-            {
-                picked[slot]
-            } else {
-                defaults[slot]
-            };
-            let attach = crate::data::Attach(self.gun_attach.get(&gun).copied().unwrap_or(0));
-            (gun, crate::progression::allowed_attach(level, gun, attach))
-        })
+        let mut p = self.loadout_guns[0];
+        let mut s = self.loadout_guns[1];
+        if !crate::data::PRIMARY_GUNS.contains(&p) || !crate::progression::gun_unlocked(level, p) {
+            p = crate::data::DEFAULT_LOADOUT_GUNS[0];
+        }
+        if !crate::data::SECONDARY_GUNS.contains(&s) || !crate::progression::gun_unlocked(level, s) {
+            s = crate::data::DEFAULT_LOADOUT_GUNS[1];
+        }
+        let a0 = crate::data::Attach(self.gun_attach.get(&p).copied().unwrap_or(0));
+        let a1 = crate::data::Attach(self.gun_attach.get(&s).copied().unwrap_or(0));
+        [
+            (p, crate::progression::allowed_attach(level, p, a0)),
+            (s, crate::progression::allowed_attach(level, s, a1)),
+        ]
+    }
+
+    /// Backwards compatible helper for loadout.
+    pub fn class_loadout(&self, _c: Character) -> [(u8, crate::data::Attach); 2] {
+        self.loadout()
     }
 
     /// The skin this player shows on `gun`.

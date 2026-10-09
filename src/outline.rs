@@ -7,19 +7,21 @@
 // The shader-type derive generates layout checks that are never called.
 #![allow(dead_code)]
 
-use bevy::pbr::{MaterialPipeline, MaterialPipelineKey, NotShadowCaster, NotShadowReceiver};
+use bevy::asset::uuid_handle;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeValues};
 use bevy::render::render_resource::{
-    AsBindGroup, Face, RenderPipelineDescriptor, ShaderRef, ShaderType,
+    AsBindGroup, Face, RenderPipelineDescriptor, ShaderType,
     SpecializedMeshPipelineError, VertexFormat,
 };
-use bevy::asset::weak_handle;
+use bevy::shader::ShaderRef;
 use std::collections::{HashMap, HashSet};
 
 use crate::config::Settings;
 
-const SHADER: Handle<Shader> = weak_handle!("2a7e9f14-5b3c-4d61-8e0f-91c4a6b7d203");
+const SHADER: Handle<Shader> = uuid_handle!("2a7e9f14-5b3c-4d61-8e0f-91c4a6b7d203");
 
 /// The normal averaged over every vertex at the same spot, so the pushed-out
 /// hull doesn't split open at the hard edges of boxes and cylinders.
@@ -74,7 +76,7 @@ impl Material for OutlineMaterial {
         AlphaMode::Blend
     }
     fn specialize(
-        _pipeline: &MaterialPipeline<Self>,
+        _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
@@ -101,7 +103,8 @@ pub struct OutlinePlugin;
 
 impl Plugin for OutlinePlugin {
     fn build(&self, app: &mut App) {
-        app.world_mut()
+        let _ = app
+            .world_mut()
             .resource_mut::<Assets<Shader>>()
             .insert(SHADER.id(), Shader::from_wgsl(WGSL, "outline.wgsl"));
         app.add_plugins(MaterialPlugin::<OutlineMaterial>::default())
@@ -194,22 +197,25 @@ fn add_hulls(
     for (e, kind, mesh) in &new {
         let id = mesh.0.id();
         if !smoothed.0.contains(&id) {
-            let Some(m) = meshes.get_mut(id) else { continue };
+            let Some(mut m) = meshes.get_mut(id) else { continue };
             if m.attribute(Mesh::ATTRIBUTE_COLOR).is_none() {
                 continue;
             }
-            smooth_normals(m);
+            smooth_normals(&mut m);
             smoothed.0.insert(id);
         }
-        commands.entity(e).with_child((
-            Hull,
-            Mesh3d(mesh.0.clone()),
-            MeshMaterial3d(mats.0[kind].clone()),
-            NotShadowCaster,
-            NotShadowReceiver,
-            Transform::default(),
-            Visibility::Inherited,
-        ));
+        commands
+            .entity(e)
+            .insert(Visibility::default())
+            .with_child((
+                Hull,
+                Mesh3d(mesh.0.clone()),
+                MeshMaterial3d(mats.0[kind].clone()),
+                NotShadowCaster,
+                NotShadowReceiver,
+                Transform::default(),
+                Visibility::Inherited,
+            ));
     }
 }
 
@@ -247,7 +253,7 @@ struct OutlineParams {
     fade_end: f32,
 }
 
-@group(2) @binding(0) var<uniform> outline: OutlineParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> outline: OutlineParams;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,

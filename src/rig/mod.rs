@@ -484,7 +484,12 @@ pub fn spawn_rig_with(
                 } else {
                     body.clone()
                 };
-                let mut part = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat)));
+                let mut part = commands.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(mat),
+                    Transform::default(),
+                    Visibility::default(),
+                ));
                 if !*glow {
                     part.insert(crate::outline::Outline::Figure);
                 }
@@ -515,6 +520,8 @@ pub fn spawn_rig_with(
                 Mesh3d(assets.finger[&model].clone()),
                 MeshMaterial3d(body.clone()),
                 crate::outline::Outline::Figure,
+                Transform::default(),
+                Visibility::default(),
             ));
         }
         let t = joint(

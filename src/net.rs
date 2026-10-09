@@ -27,7 +27,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 13;
+const PROTOCOL_VERSION: u32 = 14;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -178,7 +178,7 @@ struct ClientUpdate {
     skin: u8,
     gun_skins: Vec<u8>,
     class_guns: [(u8, crate::data::Attach); 2],
-    kit: [crate::data::Ability; 3],
+    kit: [Option<crate::data::Ability>; 3],
     char_level: u8,
     ready: bool,
     shots: Vec<Shot>,
@@ -423,7 +423,7 @@ pub struct Notice(pub String);
 pub struct LocalReady(pub bool);
 
 /// Requests from the menus.
-#[derive(Event, Clone, Debug)]
+#[derive(Message, Clone, Debug)]
 pub enum PartyRequest {
     Solo,
     /// A solo practice match with the sandbox tools.
@@ -442,7 +442,7 @@ impl Plugin for NetPlugin {
             .init_resource::<Notice>()
             .init_resource::<LocalReady>()
             .init_resource::<PublicIp>()
-            .add_event::<PartyRequest>()
+            .add_message::<PartyRequest>()
             .add_systems(Update, poll_public_ip)
             .add_systems(Startup, apply_launch)
             .add_systems(Update, handle_requests.before(Phase::NetIn))
@@ -459,8 +459,8 @@ impl Plugin for NetPlugin {
                 Update,
                 (
                     sync_own_choices,
-                    host_send.run_if(is_host.and(resource_exists::<Net>)),
-                    client_send.run_if(is_client.and(resource_exists::<Net>)),
+                    host_send.run_if(is_host.and_then(resource_exists::<Net>)),
+                    client_send.run_if(is_client.and_then(resource_exists::<Net>)),
                     clear_outbox.run_if(not(is_host)),
                 )
                     .chain()
@@ -470,7 +470,7 @@ impl Plugin for NetPlugin {
                 Update,
                 move_puppets
                     .in_set(Phase::Present)
-                    .run_if(is_client.and(in_state(AppState::InGame))),
+                    .run_if(is_client.and_then(in_state(AppState::InGame))),
             )
             .add_systems(OnExit(AppState::InGame), forget_puppets)
             .add_systems(Last, say_goodbye.run_if(resource_exists::<Net>));
@@ -491,7 +491,7 @@ fn apply_launch(
     mut session: ResMut<Session>,
     mut state: ResMut<MatchState>,
     mut notice: ResMut<Notice>,
-    mut requests: EventWriter<PartyRequest>,
+    mut requests: MessageWriter<PartyRequest>,
 ) {
     if let Some(name) = &launch.name {
         let name: String = name.chars().take(MAX_NAME_LEN).collect();
@@ -564,7 +564,7 @@ fn resolve(target: &str) -> Result<SocketAddr, String> {
 
 fn handle_requests(
     mut commands: Commands,
-    mut requests: EventReader<PartyRequest>,
+    mut requests: MessageReader<PartyRequest>,
     time: Res<Time>,
     net: Option<Res<Net>>,
     profile: Res<Profile>,
@@ -576,12 +576,12 @@ fn handle_requests(
     mut next: ResMut<NextState<AppState>>,
     mut public_ip: ResMut<PublicIp>,
 ) {
-    for req in requests.read() {
+    for req in requests.read().cloned() {
         let map = state.map;
         let me = || PlayerInfo {
             gun_skins: profile.gun_skins.clone(),
-            class_guns: profile.class_loadout(profile.character),
-            kit: profile.kit(profile.character),
+            class_guns: profile.loadout(),
+            kit: [None, None, None],
             char_level: profile.char_level(profile.character).0 as u8,
             ..PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin)
         };
@@ -600,7 +600,7 @@ fn handle_requests(
                 next.set(AppState::Lobby);
             }
             PartyRequest::Host(port) => {
-                let socket = match UdpSocket::bind(("0.0.0.0", *port)) {
+                let socket = match UdpSocket::bind(("0.0.0.0", port)) {
                     Ok(s) => s,
                     Err(e) => {
                         notice.0 = format!("Can't host on port {port}: {e}");
@@ -614,7 +614,7 @@ fn handle_requests(
                 let ip = lan_ip()
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "<your IP>".into());
-                let address = if *port == DEFAULT_PORT {
+                let address = if port == DEFAULT_PORT {
                     ip
                 } else {
                     format!("{ip}:{port}")
@@ -627,7 +627,7 @@ fn handle_requests(
                 };
                 info!("{}", session.status);
                 commands.insert_resource(n);
-                public_ip.port = *port;
+                public_ip.port = port;
                 public_ip.visible = false;
                 roster.0 = [(0, me())].into();
                 *state = MatchState::new(map);
@@ -635,7 +635,7 @@ fn handle_requests(
                 next.set(AppState::Lobby);
             }
             PartyRequest::Join(target) => {
-                let addr = match resolve(target) {
+                let addr = match resolve(&target) {
                     Ok(a) => a,
                     Err(e) => {
                         notice.0 = e;
@@ -707,13 +707,9 @@ fn sync_own_choices(
         if me.skin != profile.skin {
             me.skin = profile.skin;
         }
-        let guns = profile.class_loadout(profile.character);
+        let guns = profile.loadout();
         if me.class_guns != guns {
             me.class_guns = guns;
-        }
-        let kit = profile.kit(profile.character);
-        if me.kit != kit {
-            me.kit = kit;
         }
         let level = profile.char_level(profile.character).0 as u8;
         if me.char_level != level {
@@ -818,19 +814,14 @@ fn host_receive(
                         .into_iter()
                         .take(crate::data::GUNS.len())
                         .collect();
-                    p.class_guns = if crate::progression::valid_class_guns(u.character, u.class_guns) {
+                    p.class_guns = if crate::progression::valid_loadout_guns(u.class_guns) {
                         u.class_guns
                     } else {
-                        let g = u.character.default_guns();
+                        let g = crate::data::DEFAULT_LOADOUT_GUNS;
                         [(g[0], crate::data::Attach::NONE), (g[1], crate::data::Attach::NONE)]
                     };
                     let level = u.char_level.clamp(1, crate::data::MAX_CHAR_LEVEL as u8);
                     p.char_level = level;
-                    p.kit = if crate::data::valid_kit(u.character, level as u32, u.kit) {
-                        u.kit
-                    } else {
-                        u.character.default_kit()
-                    };
                     p.ready = u.ready;
                 }
                 if u.pos
@@ -1026,7 +1017,7 @@ fn client_send(
         skin: profile.skin,
         gun_skins: profile.gun_skins.clone(),
         class_guns: profile.class_loadout(profile.character),
-        kit: profile.kit(profile.character),
+        kit: me.kit,
         char_level: profile.char_level(profile.character).0 as u8,
         ready: ready.0,
         shots: std::mem::take(&mut net.shots),
@@ -1047,7 +1038,7 @@ fn client_receive(
     mut puppets: ResMut<Puppets>,
     app_state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
-    mut requests: EventWriter<PartyRequest>,
+    mut requests: MessageWriter<PartyRequest>,
     assets: Res<ReplicatedAssets>,
     rigs: Res<crate::rig::RigAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1257,7 +1248,7 @@ fn move_puppets(time: Res<Time>, mut puppets: Query<(&Puppet, &mut Transform)>) 
 }
 
 /// Tell the others we're leaving so nobody waits for a timeout.
-fn say_goodbye(net: Res<Net>, mut exit: EventReader<AppExit>) {
+fn say_goodbye(net: Res<Net>, mut exit: MessageReader<AppExit>) {
     if exit.read().next().is_some() {
         if let Some(server) = net.server {
             net.send_to(&ClientMsg::Bye, server);

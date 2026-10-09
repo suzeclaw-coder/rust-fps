@@ -3,9 +3,9 @@
 //! marker follows it. Each player has one ping at a time; it fades after a
 //! few seconds.
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::abilities::{queue_action, ActionCounter};
 use crate::config::{Action, InputExt, Settings};
@@ -104,7 +104,7 @@ fn send_ping(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -120,7 +120,7 @@ fn send_ping(
     if !keys.tapped(&settings, Action::Ping) && !mouse.just_pressed(MouseButton::Middle) {
         return;
     }
-    if *cooldown > 0.0 || !can_act(&session, &roster, &state, &paused, &window) {
+    if *cooldown > 0.0 || !can_act(&session, &roster, &state, &paused, &cursor) {
         return;
     }
     *cooldown = 0.4;
@@ -206,11 +206,11 @@ fn spawn_pings(
                 PingLabel,
                 Text::new(name),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: 14.0.into(),
                     ..default()
                 },
                 TextColor(color),
-                TextLayout::new_with_justify(JustifyText::Center),
+                TextLayout::justify(Justify::Center),
                 Node {
                     position_type: PositionType::Absolute,
                     ..default()

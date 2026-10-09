@@ -8,18 +8,19 @@
 // The shader-type derive generates layout checks that are never called.
 #![allow(dead_code)]
 
-use bevy::asset::{weak_handle, RenderAssetUsages};
+use bevy::asset::{uuid_handle, RenderAssetUsages};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, ShaderRef, ShaderType, TextureDimension, TextureFormat,
+    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
 };
+use bevy::shader::ShaderRef;
 use std::collections::HashMap;
 
 pub type PaintedMaterial = ExtendedMaterial<StandardMaterial, Painted>;
 
-const SHADER: Handle<Shader> = weak_handle!("6c1f0a52-8d3e-4f7a-9b2c-3e5d7a9c1b40");
+const SHADER: Handle<Shader> = uuid_handle!("6c1f0a52-8d3e-4f7a-9b2c-3e5d7a9c1b40");
 
 /// Settings for the painted layer (the numbers are in art-direction.md).
 #[derive(Clone, Copy, ShaderType, Debug, Reflect)]
@@ -81,7 +82,8 @@ pub struct PaintedPlugin;
 
 impl Plugin for PaintedPlugin {
     fn build(&self, app: &mut App) {
-        app.world_mut()
+        let _ = app
+            .world_mut()
             .resource_mut::<Assets<Shader>>()
             .insert(SHADER.id(), Shader::from_wgsl(WGSL, "painted.wgsl"));
         app.add_plugins(MaterialPlugin::<PaintedMaterial>::default())
@@ -146,7 +148,7 @@ fn swap_materials(
 /// Copies changes to plain materials (hit flashes, tints, glows) onto their
 /// painted copies, and drops copies whose material is gone.
 fn follow_changes(
-    mut events: EventReader<AssetEvent<StandardMaterial>>,
+    mut events: MessageReader<AssetEvent<StandardMaterial>>,
     mut copies: ResMut<Copies>,
     plain: Res<Assets<StandardMaterial>>,
     mut painted: ResMut<Assets<PaintedMaterial>>,
@@ -155,13 +157,13 @@ fn follow_changes(
         match ev {
             AssetEvent::Modified { id } => {
                 if let (Some(h), Some(m)) = (copies.0.get(id), plain.get(*id)) {
-                    if let Some(p) = painted.get_mut(h) {
+                    if let Some(mut p) = painted.get_mut(h) {
                         p.base = m.clone();
                     }
                 }
             }
             AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
-                copies.0.remove(id);
+                copies.0.remove(&id);
             }
             _ => {}
         }
@@ -244,9 +246,9 @@ struct PaintParams {
     rim: f32,
 }
 
-@group(2) @binding(100) var<uniform> paint: PaintParams;
-@group(2) @binding(101) var grain_tex: texture_2d<f32>;
-@group(2) @binding(102) var grain_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> paint: PaintParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var grain_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var grain_samp: sampler;
 
 // World-space grain seen from three sides, blended by the surface normal.
 fn triplanar(p: vec3<f32>, w: vec3<f32>) -> f32 {

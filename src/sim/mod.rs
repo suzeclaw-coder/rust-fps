@@ -11,7 +11,7 @@ use crate::avatars::spawn_replicated;
 use crate::data::{
     alt_fire, elements_in, gun_def, has_perk, roll_armory, tier_mult, AltFire, Attach,
     GRENADE_RECHARGE,
-    xp_to_next, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
+    xp_to_next, Ability, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
     ROUNDS_PER_STAGE, STAGES,
     MAX_AUGMENT, MAX_GUN_TIER, MAX_TIER,
 };
@@ -68,6 +68,7 @@ impl Plugin for SimPlugin {
                     rounds,
                     enemy_ai,
                     powerups,
+                    ability_pickups,
                     mystery_box,
                     teleporter,
                     check_game_over,
@@ -82,7 +83,7 @@ impl Plugin for SimPlugin {
                 process_actions
                     .after(Phase::Local)
                     .before(Phase::Sim)
-                    .run_if(in_state(AppState::InGame).and(is_authority)),
+                    .run_if(in_state(AppState::InGame).and_then(is_authority)),
             )
             .add_systems(OnEnter(AppState::InGame), clear_sim);
     }
@@ -235,6 +236,12 @@ pub struct PowerUpBrain {
     life: f32,
 }
 
+#[derive(Component)]
+pub struct AbilityBrain {
+    pub ability: Ability,
+    pub life: f32,
+}
+
 struct DamageEvent {
     target: Entity,
     amount: f32,
@@ -299,6 +306,7 @@ fn explode(
     fx: &mut FxQueue,
     out: &mut FxOutbox,
     color: Color,
+    _roster: Option<&Roster>,
 ) {
     for (e, p) in enemies {
         let d = (*p + Vec3::Y).distance(pos);
@@ -384,10 +392,11 @@ fn give_xp(p: &mut PlayerInfo, amount: u32) {
             p.pending_picks += 1;
         }
     }
-    offer_picks(p);
+    // pending_picks accumulate as free upgrade tokens for the Upgrade Station without forcing B popup.
 }
 
 /// Rolls the next three choices if a pick is waiting.
+#[allow(dead_code)]
 fn offer_picks(p: &mut PlayerInfo) {
     if p.pending_picks > 0 && p.choices.is_empty() {
         p.choices = roll_choices(p);
@@ -485,37 +494,25 @@ fn process_actions(
                     DevCmd::Spawn { .. } | DevCmd::KillAll => dev.0.push((id, cmd)),
                 }
             }
+            PlayerAction::BuyUpgrade(upgrade) => {
+                if upgrade.is_maxed(p) {
+                    continue;
+                }
+                let cost = upgrade.cost(p);
+                if p.pending_picks > 0 {
+                    p.pending_picks = p.pending_picks.saturating_sub(1);
+                } else if p.points >= cost {
+                    p.points -= cost;
+                } else {
+                    continue;
+                }
+                upgrade.apply(p);
+            }
             PlayerAction::Choose(i) => {
                 let Some(choice) = p.choices.get(i as usize).copied() else {
                     continue;
                 };
-                match choice {
-                    Upgrade::Ability(s) => {
-                        let t = &mut p.tiers[s as usize];
-                        *t = (*t + 1).min(MAX_TIER);
-                    }
-                    Upgrade::GunElement(e) => p.gun_elements |= Element::ALL[e as usize].bit(),
-                    Upgrade::AbilityElement(e) => {
-                        p.ability_elements |= Element::ALL[e as usize].bit()
-                    }
-                    Upgrade::Stat(st) => {
-                        let n = &mut p.stats[st as usize];
-                        *n = (*n + 1).min(Stat::MAX_STACKS);
-                    }
-                    Upgrade::Weapon(s) => {
-                        let t = &mut p.gun_tiers[s as usize & 1];
-                        *t = (*t + 1).min(MAX_GUN_TIER);
-                    }
-                    Upgrade::Augment(s) => {
-                        let s = s as usize & 1;
-                        if p.augments[s] < MAX_AUGMENT {
-                            p.augments[s] += 1;
-                            if p.kit[s].augment() == crate::data::Augment::Charges {
-                                p.charges[s] += 1;
-                            }
-                        }
-                    }
-                }
+                choice.apply(p);
                 p.pending_picks = p.pending_picks.saturating_sub(1);
                 p.choices = if p.pending_picks > 0 {
                     roll_choices(p)
@@ -523,26 +520,7 @@ fn process_actions(
                     Vec::new()
                 };
             }
-            PlayerAction::WeaponAbility(i) => {
-                let i = i as usize;
-                if !p.alive || i > 1 || p.weapon_cd[i] > 0.0 {
-                    continue;
-                }
-                let ability = p.character.weapon_abilities()[i];
-                let focus = 1.0 - p.stat(Stat::Focus) * Stat::Focus.per_stack();
-                p.weapon_cd[i] = ability.cooldown() * focus;
-                p.buff = Some(ability);
-                p.buff_time = ability.def().duration;
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Ring {
-                        pos: p.pos,
-                        radius: 2.5,
-                        color: ability.def().color,
-                    },
-                );
-            }
+            PlayerAction::WeaponAbility(_) => {}
             PlayerAction::Ping { pos, target } => {
                 if pos.iter().all(|v| v.is_finite()) {
                     emit(
@@ -583,7 +561,13 @@ fn process_actions(
                     let amount = (150.0 + share * b.max_health) * level_multiplier(p);
                     // A melee kill is worth more than a shot kill.
                     if amount >= b.health || state.insta_kill > 0.0 {
-                        give_points(p, 70, &state);
+                        let melee_pts = match b.kind {
+                            NetKind::Brute => 300,
+                            NetKind::Boss(_) => 2500,
+                            NetKind::Shooter => 180,
+                            _ => 130,
+                        };
+                        give_points(p, melee_pts, &state);
                     }
                     emit(
                         &mut fx,
@@ -681,6 +665,9 @@ fn process_actions(
                 if !p.alive || slot > 2 {
                     continue;
                 }
+                let Some(_ability) = p.kit[slot as usize] else {
+                    continue;
+                };
                 let s = slot as usize;
                 let copies = p.copies(s);
                 if slot == 2 {
@@ -756,21 +743,34 @@ fn resolve_shots(
         enemies.iter().map(|(e, t, _)| (e, t.translation)).collect();
     let mut rng = rand::thread_rng();
     for (shooter, shot) in shots.0.drain(..) {
-        let Some(p) = roster.0.get_mut(&shooter) else {
-            continue;
-        };
-        // Only guns you actually hold.
-        if !p.alive || !p.guns.contains(&Some(shot.gun)) {
-            continue;
-        }
         let alt = if shot.alt { alt_fire(shot.gun) } else { AltFire::Sights };
-        if alt == AltFire::Grenade {
-            if p.grenade_cd > 0.0 {
+        let (_guns, perks, _character, _slot, buff, mult, elements) = {
+            let Some(p) = roster.0.get_mut(&shooter) else {
+                continue;
+            };
+            if !p.alive || !p.guns.contains(&Some(shot.gun)) {
                 continue;
             }
-            p.grenade_cd = GRENADE_RECHARGE;
-        }
-        let p = &*p;
+            if alt == AltFire::Grenade {
+                if p.grenade_cd > 0.0 {
+                    continue;
+                }
+                p.grenade_cd = GRENADE_RECHARGE;
+            }
+            let slot = p
+                .guns
+                .iter()
+                .position(|g| *g == Some(shot.gun))
+                .unwrap_or(0);
+            let buff = p.gun_buff();
+            let mult = level_multiplier(p)
+                * p.attach[slot].handling(shot.gun).damage
+                * (1.0 + p.stat(Stat::Firepower) * Stat::Firepower.per_stack())
+                * tier_mult(p.gun_tiers[slot])
+                * buff.damage;
+            let elements = p.gun_elements | buff.elements;
+            (p.guns, p.perks, p.character, slot, buff, mult, elements)
+        };
         let origin = Vec3::from_array(shot.origin);
         let dir = Vec3::from_array(shot.dir).normalize_or_zero();
         if !origin.is_finite() || dir == Vec3::ZERO {
@@ -798,19 +798,6 @@ fn resolve_shots(
         } else {
             emit(&mut fx, &mut out, tracer);
         }
-
-        let slot = p
-            .guns
-            .iter()
-            .position(|g| *g == Some(shot.gun))
-            .unwrap_or(0);
-        let buff = p.gun_buff();
-        let mult = level_multiplier(p)
-            * p.attach[slot].handling(shot.gun).damage
-            * (1.0 + p.stat(Stat::Firepower) * Stat::Firepower.per_stack())
-            * tier_mult(p.gun_tiers[slot])
-            * buff.damage;
-        let elements = p.gun_elements | buff.elements;
         if alt == AltFire::Grenade {
             explode(
                 end - dir * 0.3,
@@ -823,6 +810,7 @@ fn resolve_shots(
                 &mut fx,
                 &mut out,
                 Color::srgb(1.0, 0.55, 0.2),
+                Some(&roster),
             );
             continue;
         }
@@ -838,6 +826,7 @@ fn resolve_shots(
                 &mut fx,
                 &mut out,
                 Color::srgb(1.0, 0.4, 0.1),
+                Some(&roster),
             );
         }
         if let GunSpecial::Explosive { radius } = def.special {
@@ -852,6 +841,7 @@ fn resolve_shots(
                 &mut fx,
                 &mut out,
                 Color::srgb(0.3, 1.0, 0.4),
+                Some(&roster),
             );
             continue;
         }
@@ -873,7 +863,8 @@ fn resolve_shots(
         } else {
             1.0
         };
-        let mut amount = def.damage * mult * pellets * if headshot { def.headshot } else { 1.0 };
+        let headshot_mult = if headshot { def.headshot } else { 1.0 };
+        let mut amount = def.damage * mult * pellets * headshot_mult;
         if hit.penetrated {
             amount *= crate::physics::PENETRATION_DAMAGE_FACTOR;
         }
@@ -934,7 +925,7 @@ fn resolve_shots(
                 });
             }
         }
-        if headshot && has_perk(p.perks, Perk::BoomShot) && rng.gen_bool(0.3) {
+        if headshot && has_perk(perks, Perk::BoomShot) && rng.gen_bool(0.3) {
             explode(
                 end,
                 3.0,
@@ -946,6 +937,7 @@ fn resolve_shots(
                 &mut fx,
                 &mut out,
                 Color::srgb(1.0, 0.5, 0.1),
+                Some(&roster),
             );
         }
         // Soul Siphon: hits heal the shooter.
@@ -1225,16 +1217,24 @@ fn apply_damage(
                     );
                 }
                 if killed {
-                    let bonus = if headshot { 40 } else { 0 };
-                    let (base, xp) = match brain.kind {
-                        NetKind::Brute => (120, 60),
-                        NetKind::Boss(_) => (1500, 400),
-                        _ => (60, 25),
+                    let hs_bonus = if headshot { 75 } else { 0 };
+                    let special_bonus = if brain.is_sprinter {
+                        30
+                    } else if brain.crawler {
+                        20
+                    } else {
+                        0
                     };
-                    give_points(p, base + bonus, &state);
+                    let (base, xp) = match brain.kind {
+                        NetKind::Brute => (250, 80),
+                        NetKind::Boss(_) => (2000, 500),
+                        NetKind::Shooter => (150, 50),
+                        _ => (90, 30),
+                    };
+                    give_points(p, base + hs_bonus + special_bonus, &state);
                     p.kills += 1;
                     p.ult_charge = (p.ult_charge + 3.0).min(100.0);
-                    let xp = xp + if headshot { 15 } else { 0 };
+                    let xp = xp + if headshot { 25 } else { 0 };
                     give_xp(p, xp);
                 } else if !chained {
                     give_points(p, 10, &state);
@@ -1328,6 +1328,53 @@ fn apply_damage(
                     headshot,
                 },
             );
+            let ability_drops: Vec<Ability> = match brain.kind {
+                NetKind::Boss(_) => {
+                    let ult_pool: Vec<Ability> = Ability::ALL.iter().copied().filter(|a| a.is_ult()).collect();
+                    let count = rng.gen_range(1..=2);
+                    let mut drops = Vec::new();
+                    if !ult_pool.is_empty() {
+                        drops.push(ult_pool[rng.gen_range(0..ult_pool.len())]);
+                    }
+                    while drops.len() < count {
+                        drops.push(Ability::ALL[rng.gen_range(0..Ability::ALL.len())]);
+                    }
+                    drops
+                }
+                NetKind::Brute if rng.gen_bool(0.25) => {
+                    vec![Ability::ALL[rng.gen_range(0..Ability::ALL.len())]]
+                }
+                NetKind::Shooter if rng.gen_bool(0.12) => {
+                    vec![Ability::ALL[rng.gen_range(0..Ability::ALL.len())]]
+                }
+                NetKind::Grunt if rng.gen_bool(0.015) => {
+                    vec![Ability::ALL[rng.gen_range(0..Ability::ALL.len())]]
+                }
+                _ => Vec::new(),
+            };
+
+            for (idx, ability) in ability_drops.into_iter().enumerate() {
+                let id = state.next_net_id;
+                state.next_net_id += 1;
+                let offset = if idx == 0 {
+                    Vec3::ZERO
+                } else {
+                    Vec3::new(rng.gen_range(-0.8..0.8), 0.0, rng.gen_range(-0.8..0.8))
+                };
+                commands.spawn((
+                    crate::InGameEntity,
+                    Replicated {
+                        id,
+                        kind: NetKind::AbilityDrop(ability as u8),
+                    },
+                    Transform::from_translation(pos + offset + Vec3::Y * 0.5),
+                    AbilityBrain {
+                        ability,
+                        life: 35.0,
+                    },
+                ));
+            }
+
             if let NetKind::Boss(level) = brain.kind {
                 boss_down = Some(level);
                 continue;
@@ -1336,7 +1383,11 @@ fn apply_damage(
             let ready = last_drop.map_or(true, |t| now - t >= POWERUP_GAP || now < t);
             if ready && rng.gen_bool(POWERUP_CHANCE) {
                 *last_drop = Some(now);
-                let kind = PowerUp::ALL[rng.gen_range(0..PowerUp::ALL.len())];
+                let kind = if rng.gen_bool(0.40) {
+                    PowerUp::TEAM_POWERUPS[rng.gen_range(0..PowerUp::TEAM_POWERUPS.len())]
+                } else {
+                    PowerUp::WEAPON_POWERUPS[rng.gen_range(0..PowerUp::WEAPON_POWERUPS.len())]
+                };
                 let id = state.next_net_id;
                 state.next_net_id += 1;
                 commands.spawn((
@@ -1372,11 +1423,15 @@ fn boss_defeated(state: &mut MatchState, roster: &mut Roster, level: u8) {
     state.boss = 0;
     state.boss_hp = 0.0;
     state.to_spawn = 0;
+    let boss_reward = 1000 + 500 * (state.stage as u32);
+    state.objective_seq = state.objective_seq.wrapping_add(1);
+    state.objective_reward = boss_reward;
+    state.objective_announcement = format!("BOSS DEFEATED! +{} PTS", boss_reward);
+    info!("Objective Complete: Boss defeated! Awarded {} points.", boss_reward);
     for p in roster.0.values_mut() {
-        give_points(p, 500, state);
-        give_xp(p, 300);
+        give_points(p, boss_reward, state);
+        give_xp(p, 500);
         p.pending_picks += 1;
-        offer_picks(p);
     }
     if level >= 1 || state.stage + 1 >= STAGES {
         state.won = true;
@@ -1497,6 +1552,18 @@ fn rounds(
 
     if state.to_spawn == 0 && alive_enemies == 0 {
         if state.intermission <= 0.0 {
+            // Round cleared: award round / objective completion bonus points!
+            if state.round > 0 {
+                let reward = 300 + 100 * state.round;
+                state.objective_seq = state.objective_seq.wrapping_add(1);
+                state.objective_reward = reward;
+                state.objective_announcement = format!("ROUND {} CLEARED! +{} PTS", state.round, reward);
+                info!("Objective Complete: Round {} cleared! Awarded {} bonus points.", state.round, reward);
+                for p in roster.0.values_mut() {
+                    give_points(p, reward, &state);
+                    give_xp(p, 100 + 20 * state.round);
+                }
+            }
             // Round cleared; a longer breather before a boss.
             state.intermission = if run && state.stage_round == ROUNDS_PER_STAGE {
                 7.0
@@ -1917,7 +1984,7 @@ pub fn compute_crowd_separation_grid(
         let dir = if dist > 1e-4 {
             delta / dist
         } else {
-            let angle = (entity.index() as f32 * 2.399).sin();
+            let angle = (entity.index().index() as f32 * 2.399).sin();
             Vec3::new(angle.cos(), 0.0, angle.sin()).normalize_or_zero()
         };
 
@@ -1998,7 +2065,7 @@ pub fn compute_crowd_separation(
         let dir = if dist > 1e-4 {
             delta / dist
         } else {
-            let angle = (entity.index() as f32 * 2.399).sin();
+            let angle = (entity.index().index() as f32 * 2.399).sin();
             Vec3::new(angle.cos(), 0.0, angle.sin()).normalize_or_zero()
         };
 
@@ -2540,53 +2607,119 @@ fn powerups(
             commands.entity(e).despawn();
             continue;
         }
-        let grabbed = roster
+        let pickup_pos = tf.translation.with_y(0.0);
+        let grabber_id = roster
             .0
             .values()
-            .any(|pl| pl.alive && pl.feet().with_y(0.0).distance(tf.translation.with_y(0.0)) < 1.6);
-        if !grabbed {
+            .find(|pl| pl.alive && pl.feet().with_y(0.0).distance(pickup_pos) < 1.6)
+            .map(|pl| pl.id);
+        let Some(grabber_id) = grabber_id else {
             continue;
-        }
+        };
         commands.entity(e).despawn();
         state.last_powerup = Some(p.kind);
         state.powerup_seq += 1;
-        match p.kind {
-            PowerUp::Nuke => {
-                // Bosses shrug it off.
-                for (enemy, t, _) in enemies.iter().filter(|(_, _, b)| !b.kind.is_boss()) {
-                    damage.0.push(DamageEvent {
-                        target: enemy,
-                        amount: f32::MAX / 4.0,
-                        from: None,
-                        headshot: false,
-                        legs: false,
-                        elements: 0,
-                        chained: true,
-                        stun: 0.0,
-                        knockback: Vec3::ZERO,
-                    });
-                    emit(
-                        &mut fx,
-                        &mut out,
-                        Fx::Explosion {
-                            pos: (t.translation + Vec3::Y).to_array(),
-                            radius: 1.5,
-                            color: [1.0, 0.6, 0.2],
-                        },
-                    );
-                }
-                for pl in roster.0.values_mut() {
-                    give_points(pl, 400, &state);
+        if let Some(wb) = p.kind.as_weapon_buff() {
+            for pl in roster.0.values_mut() {
+                if pl.alive && (pl.id == grabber_id || pl.feet().with_y(0.0).distance(pickup_pos) < 12.0) {
+                    pl.buff = Some(wb);
+                    pl.buff_time = 18.0;
                 }
             }
-            PowerUp::InstaKill => state.insta_kill = 30.0,
-            PowerUp::DoublePoints => state.double_points = 30.0,
-            PowerUp::MaxAmmo => state.max_ammo_seq += 1,
+        } else {
+            match p.kind {
+                PowerUp::Nuke => {
+                    // Bosses shrug it off.
+                    for (enemy, t, _) in enemies.iter().filter(|(_, _, b)| !b.kind.is_boss()) {
+                        damage.0.push(DamageEvent {
+                            target: enemy,
+                            amount: f32::MAX / 4.0,
+                            from: None,
+                            headshot: false,
+                            legs: false,
+                            elements: 0,
+                            chained: true,
+                            stun: 0.0,
+                            knockback: Vec3::ZERO,
+                        });
+                        emit(
+                            &mut fx,
+                            &mut out,
+                            Fx::Explosion {
+                                pos: (t.translation + Vec3::Y).to_array(),
+                                radius: 1.5,
+                                color: [1.0, 0.6, 0.2],
+                            },
+                        );
+                    }
+                    for pl in roster.0.values_mut() {
+                        give_points(pl, 400, &state);
+                    }
+                }
+                PowerUp::InstaKill => state.insta_kill = 30.0,
+                PowerUp::DoublePoints => state.double_points = 30.0,
+                PowerUp::MaxAmmo => state.max_ammo_seq += 1,
+                _ => {}
+            }
         }
     }
 }
 
+fn ability_pickups(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut roster: ResMut<Roster>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
+    mut pickups: Query<(Entity, &Transform, &mut AbilityBrain)>,
+) {
+    let dt = time.delta_secs();
+    for (e, tf, mut brain) in &mut pickups {
+        brain.life -= dt;
+        if brain.life <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let pickup_pos = tf.translation.with_y(0.0);
+        let grabber = roster
+            .0
+            .values_mut()
+            .find(|pl| pl.alive && pl.feet().with_y(0.0).distance(pickup_pos) < 1.6);
+        let Some(pl) = grabber else {
+            continue;
+        };
+        let ability = brain.ability;
+        if ability.is_ult() {
+            pl.kit[2] = Some(ability);
+            pl.ult_charge = 0.0;
+        } else if pl.kit[0].is_none() {
+            pl.kit[0] = Some(ability);
+            pl.charges[0] = 1;
+            pl.cooldowns[0] = 0.0;
+        } else if pl.kit[1].is_none() {
+            pl.kit[1] = Some(ability);
+            pl.charges[1] = 1;
+            pl.cooldowns[1] = 0.0;
+        } else {
+            pl.kit[0] = Some(ability);
+            pl.charges[0] = 1;
+            pl.cooldowns[0] = 0.0;
+        }
+        emit(
+            &mut fx,
+            &mut out,
+            Fx::Ring {
+                pos: pl.pos,
+                radius: 2.5,
+                color: rgb(ability.color()),
+            },
+        );
+        commands.entity(e).despawn();
+    }
+}
+
 fn mystery_box(
+    mut commands: Commands,
     time: Res<Time>,
     map: Res<CurrentMap>,
     mut state: ResMut<MatchState>,
@@ -2610,6 +2743,24 @@ fn mystery_box(
                 state.box_move_after = rng.gen_range(4..9);
                 BoxState::Moving { time: 4.0 }
             } else {
+                if rng.gen_bool(0.25) {
+                    let ability = Ability::ALL[rng.gen_range(0..Ability::ALL.len())];
+                    let id = state.next_net_id;
+                    state.next_net_id += 1;
+                    let box_pos = map.0.box_spots[state.box_spot as usize];
+                    commands.spawn((
+                        crate::InGameEntity,
+                        Replicated {
+                            id,
+                            kind: NetKind::AbilityDrop(ability as u8),
+                        },
+                        Transform::from_translation(box_pos.with_y(1.2)),
+                        AbilityBrain {
+                            ability,
+                            life: 35.0,
+                        },
+                    ));
+                }
                 let (held, fitted) = roster
                     .0
                     .get(&player)
@@ -2766,9 +2917,9 @@ mod tests {
         let blast_radius = 5.0;
         let blast_damage = 100.0;
 
-        let close_enemy = (Entity::from_raw(1), Vec3::new(1.0, 0.0, 0.0));
-        let far_enemy = (Entity::from_raw(2), Vec3::new(4.0, 0.0, 0.0));
-        let outside_enemy = (Entity::from_raw(3), Vec3::new(10.0, 0.0, 0.0));
+        let close_enemy = (Entity::from_raw_u32(1).unwrap(), Vec3::new(1.0, 0.0, 0.0));
+        let far_enemy = (Entity::from_raw_u32(2).unwrap(), Vec3::new(4.0, 0.0, 0.0));
+        let outside_enemy = (Entity::from_raw_u32(3).unwrap(), Vec3::new(10.0, 0.0, 0.0));
 
         let enemies = vec![close_enemy, far_enemy, outside_enemy];
         explode(
@@ -2782,6 +2933,7 @@ mod tests {
             &mut fx,
             &mut out,
             Color::WHITE,
+            None,
         );
 
         // 2 enemies inside blast, 1 outside
@@ -2837,8 +2989,8 @@ mod tests {
 
     #[test]
     fn test_crowd_separation_overlapping_enemies_push_apart() {
-        let e1 = Entity::from_raw(1);
-        let e2 = Entity::from_raw(2);
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
         let crowd = vec![
             (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
             (e2, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
@@ -2857,8 +3009,8 @@ mod tests {
 
     #[test]
     fn test_crowd_separation_mass_hierarchy_brute_pushes_standard() {
-        let brute = Entity::from_raw(1);
-        let grunt = Entity::from_raw(2);
+        let brute = Entity::from_raw_u32(1).unwrap();
+        let grunt = Entity::from_raw_u32(2).unwrap();
         let crowd = vec![
             (brute, Vec3::new(0.0, 0.0, 0.0), NetKind::Brute),
             (grunt, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
@@ -2875,7 +3027,7 @@ mod tests {
 
         // Compare against grunt vs grunt at same distance: brute pushes grunt much harder
         let two_grunts = vec![
-            (Entity::from_raw(3), Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
+            (Entity::from_raw_u32(3).unwrap(), Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
             (grunt, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
         ];
         let force_grunt_vs_grunt = compute_crowd_separation(grunt, two_grunts[1].1, two_grunts[1].2, 0.0, &two_grunts);
@@ -2884,8 +3036,8 @@ mod tests {
 
     #[test]
     fn test_crowd_separation_boss_pushes_brute_and_boss_hierarchy() {
-        let boss = Entity::from_raw(1);
-        let brute = Entity::from_raw(2);
+        let boss = Entity::from_raw_u32(1).unwrap();
+        let brute = Entity::from_raw_u32(2).unwrap();
         let crowd = vec![
             (boss, Vec3::new(0.0, 0.0, 0.0), NetKind::Boss(1)),
             (brute, Vec3::new(0.6, 0.0, 0.0), NetKind::Brute),
@@ -2902,8 +3054,8 @@ mod tests {
 
     #[test]
     fn test_crowd_separation_non_overlapping_enemies_no_push() {
-        let e1 = Entity::from_raw(1);
-        let e2 = Entity::from_raw(2);
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
         // Standard grunt mutual radius is 0.45 + 0.45 = 0.90m. At 2.0m, no separation.
         let crowd = vec![
             (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
@@ -2919,13 +3071,13 @@ mod tests {
 
     #[test]
     fn test_crowd_separation_force_clamping_prevents_jitter() {
-        let center = Entity::from_raw(100);
+        let center = Entity::from_raw_u32(100).unwrap();
         let mut crowd = vec![(center, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt)];
 
         // Crowd 25 grunts on one side all pressing against center
         for i in 1..=25 {
             crowd.push((
-                Entity::from_raw(i),
+                Entity::from_raw_u32(i).unwrap(),
                 Vec3::new(0.1 + (i as f32) * 0.01, 0.0, 0.0),
                 NetKind::Grunt,
             ));
@@ -2943,8 +3095,8 @@ mod tests {
 
     #[test]
     fn test_move_enemies_accumulates_separation_velocity() {
-        let e1 = Entity::from_raw(1);
-        let e2 = Entity::from_raw(2);
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
         let crowd = vec![
             (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
             (e2, Vec3::new(0.3, 0.0, 0.0), NetKind::Grunt),
@@ -2959,9 +3111,9 @@ mod tests {
 
     #[test]
     fn test_crowd_spatial_grid_matches_direct() {
-        let e1 = Entity::from_raw(1);
-        let e2 = Entity::from_raw(2);
-        let e3 = Entity::from_raw(3);
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
+        let e3 = Entity::from_raw_u32(3).unwrap();
         let crowd = vec![
             (e1, Vec3::new(0.0, 0.0, 0.0), NetKind::Grunt),
             (e2, Vec3::new(0.4, 0.0, 0.0), NetKind::Grunt),
@@ -3033,7 +3185,7 @@ mod tests {
 
         // Spawn a player within splash radius (< 2.2m)
         let mut roster = app.world_mut().resource_mut::<Roster>();
-        let mut player = PlayerInfo::new(1, "Player1".to_string(), crate::Character::Bulwark, 0);
+        let mut player = PlayerInfo::new(1, "Player1".to_string(), crate::Character::Ranger, 0);
         player.pos = [1.0, 0.0, 0.0];
         player.health = 100.0;
         let initial_health = player.health;
@@ -3041,7 +3193,7 @@ mod tests {
         roster.0.insert(player.id, player);
 
         // Spawn a distant player outside splash radius (> 2.2m)
-        let mut far_player = PlayerInfo::new(2, "Player2".to_string(), crate::Character::Bulwark, 0);
+        let mut far_player = PlayerInfo::new(2, "Player2".to_string(), crate::Character::Ranger, 0);
         far_player.pos = [10.0, 0.0, 0.0];
         far_player.health = 100.0;
         roster.0.insert(far_player.id, far_player);
@@ -3107,14 +3259,14 @@ mod tests {
 
         let mut roster = app.world_mut().resource_mut::<Roster>();
         // Target player right at (2.0, 0.0, 0.0) -> chest height at y=1.0
-        let mut p_target = PlayerInfo::new(1, "Target".to_string(), crate::Character::Bulwark, 0);
+        let mut p_target = PlayerInfo::new(1, "Target".to_string(), crate::Character::Ranger, 0);
         p_target.pos = [2.0, 0.0, 0.0];
         p_target.health = 100.0;
         let initial_target_pos = p_target.feet();
         roster.0.insert(p_target.id, p_target);
 
         // Nearby bystander at (2.8, 0.0, 0.0) - within 2.2m of hit
-        let mut p_bystander = PlayerInfo::new(2, "Bystander".to_string(), crate::Character::Bulwark, 0);
+        let mut p_bystander = PlayerInfo::new(2, "Bystander".to_string(), crate::Character::Ranger, 0);
         p_bystander.pos = [2.8, 0.0, 0.0];
         p_bystander.health = 100.0;
         let initial_bystander_pos = p_bystander.feet();
@@ -3626,6 +3778,174 @@ mod tests {
         let brain = app.world().get::<EnemyBrain>(enemy).unwrap();
         assert!(brain.poise_broken <= 0.0);
         assert_eq!(brain.poise, brain.max_poise, "Poise should be restored to max_poise when posture break expires");
+    }
+
+    #[test]
+    fn test_ability_pickup_equipping() {
+        use crate::data::Character;
+        let mut p = PlayerInfo::new(0, "Test".into(), Character::Bulwark, 0);
+        assert_eq!(p.kit, [None, None, None]);
+
+        // First tactical ability should equip into slot 0
+        let a1 = Ability::ShieldCharge;
+        assert!(!a1.is_ult());
+        p.kit[0] = Some(a1);
+        assert_eq!(p.kit[0], Some(a1));
+        assert_eq!(p.kit[1], None);
+        assert_eq!(p.kit[2], None);
+
+        // Second tactical ability should equip into slot 1
+        let a2 = Ability::HealingGrenade;
+        p.kit[1] = Some(a2);
+        assert_eq!(p.kit[0], Some(a1));
+        assert_eq!(p.kit[1], Some(a2));
+
+        // Ultimate ability should equip into slot 2
+        let ult = Ability::Earthshaker;
+        assert!(ult.is_ult());
+        p.kit[2] = Some(ult);
+        assert_eq!(p.kit[2], Some(ult));
+    }
+
+    #[test]
+    fn test_no_starting_buffs_and_identical_stats() {
+        use crate::data::Character;
+        for c in Character::ALL {
+            let mut p = PlayerInfo::new(0, c.name().into(), c, 0);
+            assert_eq!(p.max_health(), 100.0, "{} should have 100 base HP", c.name());
+            assert_eq!(p.health, 100.0);
+            assert_eq!(p.kit, [None, None, None], "{} should have empty kit", c.name());
+            assert_eq!(p.buff, None, "{} should start without any weapon buff", c.name());
+            assert_eq!(p.buff_time, 0.0);
+            p.damage(40.0);
+            assert_eq!(p.health, 60.0, "{} should take standard unmodified damage", c.name());
+        }
+    }
+
+    #[test]
+    fn test_weapon_powerup_conversion() {
+        use crate::data::PowerUp;
+        assert!(PowerUp::Nuke.as_weapon_buff().is_none());
+        assert!(PowerUp::InstaKill.as_weapon_buff().is_none());
+
+        assert_eq!(
+            PowerUp::Overheat.as_weapon_buff(),
+            Some(crate::data::WeaponAbility::Overheat)
+        );
+        assert_eq!(
+            PowerUp::DragonsBreath.as_weapon_buff(),
+            Some(crate::data::WeaponAbility::DragonsBreath)
+        );
+        assert_eq!(
+            PowerUp::ToxicRounds.as_weapon_buff(),
+            Some(crate::data::WeaponAbility::ToxicRounds)
+        );
+    }
+
+    #[test]
+    fn test_universal_loadout_validation() {
+        use crate::data::Attach;
+        use crate::progression::valid_loadout_guns;
+
+        // Primary (Falcon AR, 6) and Secondary (M9 Sidearm, 0)
+        assert!(valid_loadout_guns([(6, Attach::NONE), (0, Attach::NONE)]));
+        // Primary (Breacher 12, 10) and Secondary (Judge Revolver, 18)
+        assert!(valid_loadout_guns([(10, Attach::NONE), (18, Attach::NONE)]));
+        // Swapped (Pistol in primary slot) is invalid
+        assert!(!valid_loadout_guns([(0, Attach::NONE), (6, Attach::NONE)]));
+    }
+
+    #[test]
+    fn test_player_starts_from_nothing() {
+        use crate::data::{Character, Attach};
+        for c in Character::ALL {
+            let p = PlayerInfo::new(0, "Test".into(), c, 0);
+            assert_eq!(p.points, 0, "Points must start at 0");
+            assert_eq!(p.pending_picks, 0, "Pending picks must start at 0");
+            assert_eq!(p.guns, [Some(0), None], "Player must only have starter sidearm in slot 0");
+            assert_eq!(p.class_guns, [(0, Attach::NONE), (0, Attach::NONE)]);
+            assert_eq!(p.attach, [Attach::NONE; 2]);
+            assert_eq!(p.gun_tiers, [0; 2]);
+        }
+        let mut p = PlayerInfo::new(0, "Test".into(), Character::Bulwark, 0);
+        p.points = 5000;
+        p.guns = [Some(6), Some(10)];
+        p.reset_for_match();
+        assert_eq!(p.points, 0);
+        assert_eq!(p.guns, [Some(0), None]);
+    }
+
+    #[test]
+    fn test_upgrade_station_pricing_and_purchase() {
+        use crate::data::{
+            Character, Upgrade, Stat,
+            WEAPON_TIER_COSTS, STAT_BOOST_COST, ELEMENT_INFUSION_COST,
+            ABILITY_TIER_COST, SECONDARY_UNLOCK_COST, station_catalog,
+        };
+
+        let mut p = PlayerInfo::new(0, "Test".into(), Character::Bulwark, 0);
+        p.kit = [Some(Ability::ShieldCharge), None, None];
+
+        // Verify pricing rules
+        assert_eq!(Upgrade::Weapon(0).cost(&p), WEAPON_TIER_COSTS[0]); // 1000 for Tier 1
+        assert_eq!(Upgrade::Stat(Stat::Vitality).cost(&p), STAT_BOOST_COST); // 800
+        assert_eq!(Upgrade::GunElement(0).cost(&p), ELEMENT_INFUSION_COST); // 1500
+        assert_eq!(Upgrade::Ability(0).cost(&p), ABILITY_TIER_COST); // 1200
+        assert_eq!(Upgrade::UnlockSecondary(10).cost(&p), SECONDARY_UNLOCK_COST); // 1000
+
+        // Catalog offers secondary unlocks when slot 1 is empty
+        let cat = station_catalog(&p);
+        assert!(cat.contains(&Upgrade::UnlockSecondary(6)));
+        assert!(cat.contains(&Upgrade::UnlockSecondary(10)));
+
+        // Cannot buy when points are insufficient
+        assert!(!Upgrade::UnlockSecondary(10).can_purchase(&p));
+
+        // Buy with points
+        p.points = 1500;
+        assert!(Upgrade::UnlockSecondary(10).can_purchase(&p));
+        let up = Upgrade::UnlockSecondary(10);
+        p.points -= up.cost(&p);
+        up.apply(&mut p);
+        assert_eq!(p.points, 500);
+        assert_eq!(p.guns[1], Some(10));
+        assert_eq!(p.gun_tiers[1], 0);
+
+        // Slot 1 now has weapon; cannot buy unlock again
+        assert!(Upgrade::UnlockSecondary(10).is_maxed(&p));
+
+        // Weapon tier upgrade scaling
+        p.points = 10000;
+        let w_up = Upgrade::Weapon(1);
+        assert_eq!(w_up.cost(&p), 1000); // Tier 0 -> Tier 1
+        p.points -= w_up.cost(&p);
+        w_up.apply(&mut p);
+        assert_eq!(p.gun_tiers[1], 1);
+        assert_eq!(w_up.cost(&p), 2500); // Tier 1 -> Tier 2
+        p.points -= w_up.cost(&p);
+        w_up.apply(&mut p);
+        assert_eq!(p.gun_tiers[1], 2);
+        assert_eq!(w_up.cost(&p), 5000); // Tier 2 -> Tier 3
+        p.points -= w_up.cost(&p);
+        w_up.apply(&mut p);
+        assert_eq!(p.gun_tiers[1], 3);
+        assert!(w_up.is_maxed(&p)); // Maxed at Tier 3
+
+        // Free upgrade tokens (pending_picks) allow free purchases
+        p.points = 0;
+        p.pending_picks = 1;
+        let stat_up = Upgrade::Stat(Stat::Vitality);
+        assert!(stat_up.can_purchase(&p));
+    }
+
+    #[test]
+    fn test_round_clear_and_objective_rewards() {
+        let mut state = MatchState::new(0);
+        state.round = 3;
+        state.to_spawn = 0;
+
+        let reward = 300 + 100 * state.round;
+        assert_eq!(reward, 600);
     }
 }
 

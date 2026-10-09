@@ -10,7 +10,7 @@
 //! when it leaves your hand, so you can hold one as long as you like.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::config::{Action, CastMode, InputExt, Settings};
 use crate::data::Ability;
@@ -109,7 +109,7 @@ const SLOTS: [(u8, Action); 3] = [
 fn use_weapon_abilities(
     keys: Res<ButtonInput<KeyCode>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -118,7 +118,7 @@ fn use_weapon_abilities(
     mut counter: ResMut<ActionCounter>,
     mut queue: ResMut<ActionQueue>,
 ) {
-    if menu.open || !can_act(&session, &roster, &state, &paused, &window) {
+    if menu.open || !can_act(&session, &roster, &state, &paused, &cursor) {
         return;
     }
     let Some(me) = roster.me(&session) else {
@@ -139,7 +139,7 @@ fn use_abilities(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     settings: Res<Settings>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
@@ -163,7 +163,7 @@ fn use_abilities(
     let Some(me) = roster.me(&session) else {
         return;
     };
-    if !can_act(&session, &roster, &state, &paused, &window) {
+    if !can_act(&session, &roster, &state, &paused, &cursor) {
         // Menus and going down cancel aiming (a held grenade goes
         // back in your pocket).
         cast.aiming = None;
@@ -177,6 +177,9 @@ fn use_abilities(
     }
 
     let ready = |slot: u8| {
+        if me.kit[slot as usize].is_none() {
+            return false;
+        }
         if slot == 2 {
             me.ult_charge >= 100.0
         } else {
@@ -190,7 +193,7 @@ fn use_abilities(
         cast.held += dt;
         let key = SLOTS[slot as usize].1;
         // Charged abilities always work by holding and letting go.
-        let mode = if me.kit[slot as usize].charges() {
+        let mode = if me.kit[slot as usize].map_or(false, |a| a.charges()) {
             CastMode::Quick
         } else {
             settings.cast_modes[slot as usize]
@@ -216,7 +219,7 @@ fn use_abilities(
             if !keys.tapped(&settings, action) || !ready(slot) || local_cd[slot as usize] > 0.0 {
                 continue;
             }
-            let charges = me.kit[slot as usize].charges();
+            let charges = me.kit[slot as usize].map_or(false, |a| a.charges());
             if settings.cast_modes[slot as usize] == CastMode::Instant && !charges {
                 fire_slot = Some(slot);
             } else {
@@ -231,11 +234,12 @@ fn use_abilities(
     }
     cast.blocks_fire = cast.swallow_click
         || cast.aiming.is_some_and(|s| {
-            settings.cast_modes[s as usize] == CastMode::Confirm || me.kit[s as usize].charges()
+            settings.cast_modes[s as usize] == CastMode::Confirm
+                || me.kit[s as usize].map_or(false, |a| a.charges())
         });
 
     let Some(slot) = fire_slot else { return };
-    let ability = me.kit[slot as usize];
+    let Some(ability) = me.kit[slot as usize] else { return };
     let charge = if ability.charges() {
         (cast.held / FULL_CHARGE).min(1.0)
     } else {

@@ -4,7 +4,9 @@
 use bevy::prelude::*;
 
 use crate::config::Profile;
-use crate::data::{alt_fire, attach_options_for, gun_def, Attach, Slot, ATTACHMENTS};
+use crate::data::{
+    alt_fire, attach_options_for, gun_def, Attach, Slot, ATTACHMENTS, PRIMARY_GUNS, SECONDARY_GUNS,
+};
 use crate::progression::{
     attachment_unlocked, career, gun_unlocked, unlock_level, Unlock,
 };
@@ -17,31 +19,29 @@ fn xp_bar(p: &mut ChildSpawnerCommands, into: u32, need: u32) {
         Node {
             width: Val::Px(480.0),
             height: Val::Px(12.0),
+            border_radius: BorderRadius::all(Val::Px(6.0)),
             ..default()
         },
         BackgroundColor(Color::srgb(0.16, 0.18, 0.26)),
-        BorderRadius::all(Val::Px(6.0)),
     ))
     .with_children(|b| {
         b.spawn((
             Node {
                 width: Val::Percent(100.0 * into as f32 / need.max(1) as f32),
                 height: Val::Percent(100.0),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
                 ..default()
             },
             BackgroundColor(Color::srgb(0.45, 0.8, 1.0)),
-            BorderRadius::all(Val::Px(6.0)),
         ));
     });
 }
 
 pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
     let (level, into, need) = career(profile.career_xp);
-    let class = profile.character;
-    let chosen = profile.class_loadout(class);
-    let guns = class.guns();
+    let chosen = profile.loadout();
     panel(commands, false, |p| {
-        label(p, format!("{} LOADOUT", class.name().to_uppercase()), 38.0, ACCENT);
+        label(p, "WEAPON LOADOUT", 38.0, ACCENT);
         label(
             p,
             format!("Career level {level}   {into} / {need} XP to the next"),
@@ -49,18 +49,11 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
             Color::WHITE,
         );
         xp_bar(p, into, need);
-        let abilities = class.weapon_abilities();
         label(
             p,
-            format!(
-                "Weapon abilities:  {} ({})  and  {} ({})",
-                abilities[0].name(),
-                abilities[0].def().desc,
-                abilities[1].name(),
-                abilities[1].def().desc
-            ),
+            "Choose your starting primary and secondary weapon. Attachments can be fitted to any gun.",
             16.0,
-            ACCENT,
+            DIM,
         );
         // Primary on the left, secondary on the right.
         p.spawn(Node {
@@ -69,7 +62,10 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
             ..default()
         })
         .with_children(|cols| {
-            for (slot, options) in [guns.primaries, guns.secondaries].into_iter().enumerate() {
+            for (slot, options, title) in [
+                (0usize, &PRIMARY_GUNS[..], "PRIMARY WEAPON"),
+                (1usize, &SECONDARY_GUNS[..], "SECONDARY WEAPON"),
+            ] {
                 cols.spawn(Node {
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(8.0),
@@ -77,14 +73,9 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
                     ..default()
                 })
                 .with_children(|p| {
-                    label(
-                        p,
-                        if slot == 0 { "PRIMARY" } else { "SECONDARY" },
-                        22.0,
-                        Color::WHITE,
-                    );
+                    label(p, title, 22.0, Color::WHITE);
                     row(p, |r| {
-                        for g in options {
+                        for &g in options {
                             if gun_unlocked(level, g) {
                                 button_sized(
                                     r,
@@ -162,7 +153,7 @@ fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u
             r.spawn((
                 Text::new(slot.name()),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: 16.0.into(),
                     ..default()
                 },
                 TextColor(DIM),
@@ -238,11 +229,11 @@ pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) 
                         row_gap: Val::Px(4.0),
                         padding: UiRect::all(Val::Px(12.0)),
                         border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(7.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.12, 0.13, 0.19, 0.9)),
-                    BorderColor(Color::srgb(0.3, 0.32, 0.42)),
-                    BorderRadius::all(Val::Px(7.0)),
+                    BorderColor::all(Color::srgb(0.3, 0.32, 0.42)),
                 ))
                 .with_children(|c| {
                     label(c, a.name, 22.0, ACCENT);

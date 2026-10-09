@@ -4,7 +4,7 @@
 //! handing out gacha spins at the end.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::config::{Action, InputExt, Profile, Settings};
 use crate::data::{spins_for_round, ROUNDS_PER_PREMIUM_QUARTER};
@@ -120,7 +120,7 @@ pub fn start_match(
     mut result: ResMut<MatchResult>,
     mut clear: ResMut<ClearColor>,
     guns: Res<crate::gunmodels::GunAssets>,
-    mut ambient: ResMut<AmbientLight>,
+    mut ambient: ResMut<GlobalAmbientLight>,
     camera: Single<Entity, With<crate::player::LocalPlayer>>,
     mut loaded: ResMut<LoadedStage>,
 ) {
@@ -136,7 +136,7 @@ pub fn start_match(
     clear.0 = crate::graphics::sky_colors(layout.sky, state.night).0;
     // Night: dim blue ambient and a flashlight on your head.
     *ambient = if state.night {
-        AmbientLight {
+        GlobalAmbientLight {
             color: Color::srgb(0.55, 0.65, 1.0),
             // Up from 45: the film tone mapping darkens the low end.
             brightness: 70.0,
@@ -146,7 +146,7 @@ pub fn start_match(
         // Low, so shapes keep their shading; the fill light and the painted
         // material's cool shadow side do the rest. Nearly white so rooms
         // the sun can't reach keep their colours.
-        AmbientLight {
+        GlobalAmbientLight {
             color: Color::srgb(0.96, 0.97, 1.0),
             brightness: 140.0,
             ..default()
@@ -162,7 +162,7 @@ pub fn start_match(
                     range: 40.0,
                     outer_angle: 0.5,
                     inner_angle: 0.3,
-                    shadows_enabled: false,
+                    shadow_maps_enabled: false,
                     ..default()
                 },
                 Transform::from_xyz(0.25, -0.2, 0.0),
@@ -249,10 +249,10 @@ fn end_match(
     mut commands: Commands,
     things: Query<Entity, With<InGameEntity>>,
     mut clear: ResMut<ClearColor>,
-    mut ambient: ResMut<AmbientLight>,
+    mut ambient: ResMut<GlobalAmbientLight>,
     mut overlay: ResMut<Overlay>,
     mut paused: ResMut<Paused>,
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     for e in &things {
         if let Ok(mut ec) = commands.get_entity(e) {
@@ -266,7 +266,7 @@ fn end_match(
     ambient.color = Color::WHITE;
     *overlay = Overlay::None;
     paused.0 = false;
-    set_cursor_lock(&mut window, false);
+    set_cursor_lock(&mut cursor, false);
 }
 
 fn menu_keys(
@@ -275,6 +275,7 @@ fn menu_keys(
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
+    map: Option<Res<CurrentMap>>,
     mut overlay: ResMut<Overlay>,
     mut paused: ResMut<Paused>,
 ) {
@@ -292,17 +293,26 @@ fn menu_keys(
             Overlay::Sandbox => Overlay::None,
             other => other,
         };
-    } else if keys.tapped(&settings, Action::Upgrades) {
-        let has_choices = roster.me(&session).is_some_and(|m| !m.choices.is_empty());
-        *overlay = match *overlay {
-            Overlay::None if has_choices => Overlay::Upgrades,
-            Overlay::Upgrades => Overlay::None,
-            other => other,
-        };
+    } else if keys.tapped(&settings, Action::Interact) {
+        if *overlay == Overlay::Upgrades {
+            *overlay = Overlay::None;
+        } else if *overlay == Overlay::None {
+            let near = roster.me(&session).is_some_and(|me| {
+                me.alive && map.as_ref().map_or(false, |m| m.0.near_upgrade_station(me.feet()))
+            });
+            if near {
+                *overlay = Overlay::Upgrades;
+            }
+        }
     }
-    // Close the picker once everything is picked.
-    if *overlay == Overlay::Upgrades && roster.me(&session).is_none_or(|m| m.choices.is_empty()) {
-        *overlay = Overlay::None;
+    // Automatically close the station if player walks away or dies
+    if *overlay == Overlay::Upgrades {
+        let near = roster.me(&session).is_some_and(|me| {
+            me.alive && map.as_ref().map_or(false, |m| m.0.near_upgrade_station(me.feet()))
+        });
+        if !near {
+            *overlay = Overlay::None;
+        }
     }
     paused.0 = *overlay != Overlay::None;
 }
@@ -313,10 +323,10 @@ fn cursor_control(
     overlay: Res<Overlay>,
     state: Res<MatchState>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut focus_events: EventReader<bevy::window::WindowFocused>,
+    mut focus_events: MessageReader<bevy::window::WindowFocused>,
     mut away: Local<bool>,
     mut paused: ResMut<Paused>,
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     for ev in focus_events.read() {
         *away = !ev.focused;
@@ -325,8 +335,8 @@ fn cursor_control(
         *away = false;
     }
     let want = *overlay == Overlay::None && !match_ended(&state) && !*away;
-    if want != cursor_locked(&window) {
-        set_cursor_lock(&mut window, want);
+    if want != cursor_locked(&cursor) {
+        set_cursor_lock(&mut cursor, want);
     }
     // Clicking away from the window pauses a solo game too.
     if *away {

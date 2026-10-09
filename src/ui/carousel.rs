@@ -2,6 +2,7 @@
 //! stops on the one you won. Click to skip to the end.
 
 use bevy::prelude::*;
+use bevy::text::Justify;
 use rand::Rng;
 
 use crate::audio::{Snd, SoundQueue};
@@ -144,7 +145,7 @@ fn spawn_overlay(commands: &mut Commands, cards: &[u8]) {
             p.spawn((
                 Text::new("OPENING..."),
                 TextFont {
-                    font_size: 30.0,
+                    font_size: 30.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.8, 0.3)),
@@ -159,7 +160,7 @@ fn spawn_overlay(commands: &mut Commands, cards: &[u8]) {
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.06, 0.06, 0.09)),
-                BorderColor(Color::srgb(0.3, 0.3, 0.4)),
+                BorderColor::all(Color::srgb(0.3, 0.3, 0.4)),
             ))
             .with_children(|w| {
                 // An anchor at the centre of the window; the strip hangs off it.
@@ -204,7 +205,7 @@ fn spawn_overlay(commands: &mut Commands, cards: &[u8]) {
             p.spawn((
                 Text::new("Click to skip"),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: 14.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgb(0.6, 0.6, 0.65)),
@@ -227,12 +228,12 @@ fn card(p: &mut ChildSpawnerCommands, id: u8) {
             align_items: AlignItems::Center,
             padding: UiRect::all(Val::Px(6.0)),
             border: UiRect::bottom(Val::Px(6.0)),
+            border_radius: BorderRadius::all(Val::Px(6.0)),
             row_gap: Val::Px(4.0),
             ..default()
         },
         BackgroundColor(Color::srgb(0.13, 0.13, 0.17)),
-        BorderColor(rarity),
-        BorderRadius::all(Val::Px(6.0)),
+        BorderColor::all(rarity),
     ))
     .with_children(|c| {
         c.spawn((
@@ -241,10 +242,10 @@ fn card(p: &mut ChildSpawnerCommands, id: u8) {
                 height: Val::Px(84.0),
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(4.0)),
                 ..default()
             },
             BackgroundColor(col(s.color)),
-            BorderRadius::all(Val::Px(4.0)),
         ))
         .with_children(|sw| {
             sw.spawn((
@@ -259,16 +260,16 @@ fn card(p: &mut ChildSpawnerCommands, id: u8) {
         c.spawn((
             Text::new(s.name),
             TextFont {
-                font_size: 13.0,
+                font_size: 13.0.into(),
                 ..default()
             },
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(JustifyText::Center),
+            TextLayout::justify(Justify::Center),
         ));
         c.spawn((
             Text::new(s.rarity.name()),
             TextFont {
-                font_size: 11.0,
+                font_size: 11.0.into(),
                 ..default()
             },
             TextColor(rarity),

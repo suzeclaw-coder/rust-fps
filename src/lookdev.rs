@@ -70,7 +70,7 @@ impl Plugin for LookdevPlugin {
             .add_systems(
                 PostUpdate,
                 (hold_camera, hide_ui, sample_markers)
-                    .before(bevy::transform::TransformSystem::TransformPropagate)
+                    .before(bevy::transform::TransformSystems::Propagate)
                     .run_if(in_state(AppState::InGame)),
             );
     }

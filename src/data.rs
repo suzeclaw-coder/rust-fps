@@ -1353,6 +1353,12 @@ impl Character {
     }
 }
 
+/// Universal primary weapon roster.
+pub const PRIMARY_GUNS: [u8; 14] = [3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20];
+/// Universal secondary weapon roster.
+pub const SECONDARY_GUNS: [u8; 7] = [0, 1, 2, 4, 5, 18, 19];
+pub const DEFAULT_LOADOUT_GUNS: [u8; 2] = [6, 0];
+
 /// A class's guns: pick one primary and one secondary.
 pub struct ClassGuns {
     pub primaries: [u8; 2],
@@ -1362,17 +1368,11 @@ pub struct ClassGuns {
 impl Character {
     pub fn guns(self) -> ClassGuns {
         let (primaries, secondaries) = match self {
-            // Breacher 12, Stormfront Auto / Viper .45, Judge Revolver
             Character::Bulwark => ([10, 11], [1, 18]),
-            // Kestrel SMG, Tempest Burst / M9 Sidearm, Hornet MP
             Character::Medic => ([3, 8], [0, 2]),
-            // Twin Fangs, Ranger Rifle / Hammer .50, M9 Sidearm
             Character::Revenant => ([20, 7], [19, 0]),
-            // Goliath LMG, Ripsaw LMG / Wasp PDW, Viper .45
             Character::Demolisher => ([13, 14], [4, 1]),
-            // Falcon AR, Double Barrel / Hornet MP, Judge Revolver
             Character::Chemist => ([6, 12], [2, 18]),
-            // Arbiter DMR, Longbow Sniper / Hammer .50, Mamba
             Character::Ranger => ([16, 15], [19, 5]),
         };
         ClassGuns {
@@ -1383,17 +1383,15 @@ impl Character {
 
     /// The class's first primary and first secondary.
     pub fn default_guns(self) -> [u8; 2] {
-        let g = self.guns();
-        [g.primaries[0], g.secondaries[0]]
+        DEFAULT_LOADOUT_GUNS
     }
 
     /// Is `gun` one this class can bring in `slot` (0 primary, 1 secondary)?
     pub fn has_gun(self, slot: usize, gun: u8) -> bool {
-        let g = self.guns();
         if slot == 0 {
-            g.primaries.contains(&gun)
+            PRIMARY_GUNS.contains(&gun)
         } else {
-            g.secondaries.contains(&gun)
+            SECONDARY_GUNS.contains(&gun)
         }
     }
 
@@ -1946,40 +1944,116 @@ pub enum PowerUp {
     InstaKill,
     DoublePoints,
     MaxAmmo,
+    ToxicRounds,
+    LockAndLoad,
+    CryoRounds,
+    SuppressingFire,
+    Quickdraw,
+    Executioner,
+    AutoLoader,
+    ShockRounds,
+    DragonsBreath,
+    Overheat,
+    SoulSiphon,
+    Overcharge,
 }
 
 impl PowerUp {
-    pub const ALL: [PowerUp; 4] = [
+    pub const ALL: [PowerUp; 16] = [
+        PowerUp::Nuke,
+        PowerUp::InstaKill,
+        PowerUp::DoublePoints,
+        PowerUp::MaxAmmo,
+        PowerUp::ToxicRounds,
+        PowerUp::LockAndLoad,
+        PowerUp::CryoRounds,
+        PowerUp::SuppressingFire,
+        PowerUp::Quickdraw,
+        PowerUp::Executioner,
+        PowerUp::AutoLoader,
+        PowerUp::ShockRounds,
+        PowerUp::DragonsBreath,
+        PowerUp::Overheat,
+        PowerUp::SoulSiphon,
+        PowerUp::Overcharge,
+    ];
+
+    pub const TEAM_POWERUPS: [PowerUp; 4] = [
         PowerUp::Nuke,
         PowerUp::InstaKill,
         PowerUp::DoublePoints,
         PowerUp::MaxAmmo,
     ];
 
+    pub const WEAPON_POWERUPS: [PowerUp; 12] = [
+        PowerUp::ToxicRounds,
+        PowerUp::LockAndLoad,
+        PowerUp::CryoRounds,
+        PowerUp::SuppressingFire,
+        PowerUp::Quickdraw,
+        PowerUp::Executioner,
+        PowerUp::AutoLoader,
+        PowerUp::ShockRounds,
+        PowerUp::DragonsBreath,
+        PowerUp::Overheat,
+        PowerUp::SoulSiphon,
+        PowerUp::Overcharge,
+    ];
+
+    pub fn as_weapon_buff(self) -> Option<WeaponAbility> {
+        match self {
+            PowerUp::ToxicRounds => Some(WeaponAbility::ToxicRounds),
+            PowerUp::LockAndLoad => Some(WeaponAbility::LockAndLoad),
+            PowerUp::CryoRounds => Some(WeaponAbility::CryoRounds),
+            PowerUp::SuppressingFire => Some(WeaponAbility::SuppressingFire),
+            PowerUp::Quickdraw => Some(WeaponAbility::Quickdraw),
+            PowerUp::Executioner => Some(WeaponAbility::Executioner),
+            PowerUp::AutoLoader => Some(WeaponAbility::AutoLoader),
+            PowerUp::ShockRounds => Some(WeaponAbility::ShockRounds),
+            PowerUp::DragonsBreath => Some(WeaponAbility::DragonsBreath),
+            PowerUp::Overheat => Some(WeaponAbility::Overheat),
+            PowerUp::SoulSiphon => Some(WeaponAbility::SoulSiphon),
+            PowerUp::Overcharge => Some(WeaponAbility::Overcharge),
+            _ => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
+        if let Some(w) = self.as_weapon_buff() {
+            return w.name();
+        }
         match self {
             PowerUp::Nuke => "NUKE",
             PowerUp::InstaKill => "INSTA-KILL",
             PowerUp::DoublePoints => "DOUBLE POINTS",
             PowerUp::MaxAmmo => "MAX AMMO",
+            _ => "POWER-UP",
         }
     }
 
     pub fn color(self) -> Color {
+        if let Some(w) = self.as_weapon_buff() {
+            return w.color();
+        }
         match self {
             PowerUp::Nuke => Color::srgb(1.0, 0.45, 0.1),
             PowerUp::InstaKill => Color::srgb(0.9, 0.1, 0.1),
             PowerUp::DoublePoints => Color::srgb(0.2, 1.0, 0.3),
             PowerUp::MaxAmmo => Color::srgb(0.3, 0.6, 1.0),
+            _ => Color::WHITE,
         }
     }
 
     pub fn description(self) -> &'static str {
+        if let Some(w) = self.as_weapon_buff() {
+            return w.def().desc;
+        }
         match self {
             PowerUp::Nuke => "Eliminates all active zombies & grants +400 pts",
             PowerUp::InstaKill => "One-shot kill on any normal zombie",
             PowerUp::DoublePoints => "Doubles all points earned from hits and kills",
             PowerUp::MaxAmmo => "Fully replenishes ammo magazines and reserves",
+            _ => "",
         }
     }
 }
@@ -2104,7 +2178,7 @@ impl Stat {
     }
 }
 
-/// A level-up reward the player can pick.
+/// A level-up reward or station upgrade the player can pick/purchase.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Upgrade {
     /// Upgrade ability slot 0, 1 or 2 (ultimate).
@@ -2116,14 +2190,193 @@ pub enum Upgrade {
     Weapon(u8),
     /// An augment for ability slot 0 or 1.
     Augment(u8),
+    /// Purchase and unlock a secondary weapon for slot 1 (gun id).
+    UnlockSecondary(u8),
+}
+
+#[allow(dead_code)]
+pub type StationUpgrade = Upgrade;
+
+/// Upgrade station pricing catalog
+pub const WEAPON_TIER_COSTS: [u32; 3] = [1000, 2500, 5000];
+pub const STAT_BOOST_COST: u32 = 800;
+pub const ELEMENT_INFUSION_COST: u32 = 1500;
+pub const ABILITY_TIER_COST: u32 = 1200;
+pub const SECONDARY_UNLOCK_COST: u32 = 1000;
+pub const AUGMENT_COST: u32 = 1200;
+
+/// Returns the purchase cost of an upgrade for a given player.
+pub fn upgrade_cost(upgrade: Upgrade, p: &crate::PlayerInfo) -> u32 {
+    match upgrade {
+        Upgrade::Weapon(slot) => {
+            let s = (slot as usize) & 1;
+            let tier = p.gun_tiers[s];
+            match tier {
+                0 => WEAPON_TIER_COSTS[0], // 1000 for Tier 1
+                1 => WEAPON_TIER_COSTS[1], // 2500 for Tier 2
+                _ => WEAPON_TIER_COSTS[2], // 5000 for Tier 3
+            }
+        }
+        Upgrade::Stat(_) => STAT_BOOST_COST,
+        Upgrade::GunElement(_) | Upgrade::AbilityElement(_) => ELEMENT_INFUSION_COST,
+        Upgrade::Ability(_) => ABILITY_TIER_COST,
+        Upgrade::UnlockSecondary(_) => SECONDARY_UNLOCK_COST,
+        Upgrade::Augment(_) => AUGMENT_COST,
+    }
+}
+
+/// Catalog of all upgrades offered at the Upgrade Station.
+#[allow(dead_code)]
+pub fn station_catalog(p: &crate::PlayerInfo) -> Vec<Upgrade> {
+    let mut items = Vec::new();
+
+    // 1. Secondary Weapon Unlock (if slot 1 is empty, offer Falcon AR and Breacher 12)
+    if p.guns[1].is_none() {
+        items.push(Upgrade::UnlockSecondary(6));  // Falcon AR
+        items.push(Upgrade::UnlockSecondary(10)); // Breacher 12 Shotgun
+    }
+
+    // 2. Weapon Tier Upgrades (for equipped guns)
+    for s in 0..2u8 {
+        if p.guns[s as usize].is_some() && p.gun_tiers[s as usize] < MAX_GUN_TIER {
+            items.push(Upgrade::Weapon(s));
+        }
+    }
+
+    // 3. Stat Boosts
+    for st in Stat::ALL {
+        if p.stats[st as usize] < Stat::MAX_STACKS {
+            items.push(Upgrade::Stat(st));
+        }
+    }
+
+    // 4. Elemental Infusions
+    for (i, e) in Element::ALL.iter().enumerate() {
+        if p.gun_elements & e.bit() == 0 {
+            items.push(Upgrade::GunElement(i as u8));
+        }
+        if p.ability_elements & e.bit() == 0 {
+            items.push(Upgrade::AbilityElement(i as u8));
+        }
+    }
+
+    // 5. Ability Tier Upgrades
+    for s in 0..3u8 {
+        if p.kit[s as usize].is_some() && p.tiers[s as usize] < MAX_TIER {
+            items.push(Upgrade::Ability(s));
+        }
+    }
+
+    // 6. Augments
+    for s in 0..2u8 {
+        if p.kit[s as usize].is_some() && p.augments[s as usize] < MAX_AUGMENT {
+            items.push(Upgrade::Augment(s));
+        }
+    }
+
+    items
 }
 
 impl Upgrade {
+    /// Cost in points for this player (0 if the player has a free upgrade token).
+    pub fn cost(&self, p: &crate::PlayerInfo) -> u32 {
+        upgrade_cost(*self, p)
+    }
+
+    /// Base cost before any discounts.
+    pub fn base_cost(&self) -> u32 {
+        match *self {
+            Upgrade::Weapon(_) => WEAPON_TIER_COSTS[0],
+            Upgrade::Stat(_) => STAT_BOOST_COST,
+            Upgrade::GunElement(_) | Upgrade::AbilityElement(_) => ELEMENT_INFUSION_COST,
+            Upgrade::Ability(_) => ABILITY_TIER_COST,
+            Upgrade::UnlockSecondary(_) => SECONDARY_UNLOCK_COST,
+            Upgrade::Augment(_) => AUGMENT_COST,
+        }
+    }
+
+    /// Whether this player can purchase this upgrade right now.
+    pub fn can_purchase(&self, p: &crate::PlayerInfo) -> bool {
+        !self.is_maxed(p) && (p.pending_picks > 0 || p.points >= self.cost(p))
+    }
+
+    /// Whether this upgrade is already maxed or unavailable.
+    pub fn is_maxed(&self, p: &crate::PlayerInfo) -> bool {
+        match *self {
+            Upgrade::Weapon(slot) => {
+                let s = (slot as usize) & 1;
+                p.guns[s].is_none() || p.gun_tiers[s] >= MAX_GUN_TIER
+            }
+            Upgrade::Stat(st) => p.stats[st as usize] >= Stat::MAX_STACKS,
+            Upgrade::GunElement(e) => {
+                Element::ALL.get(e as usize).map_or(true, |el| p.gun_elements & el.bit() != 0)
+            }
+            Upgrade::AbilityElement(e) => {
+                Element::ALL.get(e as usize).map_or(true, |el| p.ability_elements & el.bit() != 0)
+            }
+            Upgrade::Ability(slot) => {
+                let s = slot as usize;
+                s >= 3 || p.kit[s].is_none() || p.tiers[s] >= MAX_TIER
+            }
+            Upgrade::UnlockSecondary(_) => p.guns[1].is_some(),
+            Upgrade::Augment(slot) => {
+                let s = (slot as usize) & 1;
+                p.kit[s].is_none() || p.augments[s] >= MAX_AUGMENT
+            }
+        }
+    }
+
+    /// Applies this upgrade directly to a player.
+    pub fn apply(&self, p: &mut crate::PlayerInfo) {
+        match *self {
+            Upgrade::Ability(s) => {
+                let s = (s as usize).min(2);
+                let t = &mut p.tiers[s];
+                *t = (*t + 1).min(MAX_TIER);
+            }
+            Upgrade::GunElement(e) => {
+                if let Some(el) = Element::ALL.get(e as usize) {
+                    p.gun_elements |= el.bit();
+                }
+            }
+            Upgrade::AbilityElement(e) => {
+                if let Some(el) = Element::ALL.get(e as usize) {
+                    p.ability_elements |= el.bit();
+                }
+            }
+            Upgrade::Stat(st) => {
+                let n = &mut p.stats[st as usize];
+                *n = (*n + 1).min(Stat::MAX_STACKS);
+            }
+            Upgrade::Weapon(s) => {
+                let s = (s as usize) & 1;
+                let t = &mut p.gun_tiers[s];
+                *t = (*t + 1).min(MAX_GUN_TIER);
+            }
+            Upgrade::Augment(s) => {
+                let s = s as usize & 1;
+                if p.augments[s] < MAX_AUGMENT {
+                    p.augments[s] += 1;
+                    if p.kit[s].map_or(false, |a| a.augment() == Augment::Charges) {
+                        p.charges[s] += 1;
+                    }
+                }
+            }
+            Upgrade::UnlockSecondary(gun) => {
+                p.guns[1] = Some(gun);
+                p.class_guns[1] = (gun, Attach::NONE);
+                p.attach[1] = Attach::NONE;
+                p.gun_tiers[1] = 0;
+                p.supply_seq = p.supply_seq.wrapping_add(1);
+            }
+        }
+    }
+
     pub fn label(self, p: &crate::PlayerInfo) -> String {
         let (kit, tiers) = (p.kit, p.tiers);
         match self {
             Upgrade::Ability(slot) => {
-                let name = kit[slot as usize].name();
+                let name = kit[slot as usize].map_or("Ability", |a| a.name());
                 format!("{name} tier {}", tiers[slot as usize] + 2)
             }
             Upgrade::GunElement(e) => {
@@ -2142,12 +2395,18 @@ impl Upgrade {
                 format!("{gun}{}: +25% damage and magazine", tier_name(tier))
             }
             Upgrade::Augment(slot) => {
-                let a = kit[slot as usize & 1];
+                let opt = kit[slot as usize & 1];
+                let name = opt.map_or("Ability", |a| a.name());
+                let augment = opt.map_or(Augment::Charges, |a| a.augment());
                 let n = p.augments[slot as usize & 1] + 2;
-                match a.augment() {
-                    Augment::Charges => format!("{}: {n} charges (use it {n} times in a row)", a.name()),
-                    Augment::Copies => format!("{}: {n} at once, fanned out", a.name()),
+                match augment {
+                    Augment::Charges => format!("{name}: {n} charges (use it {n} times in a row)"),
+                    Augment::Copies => format!("{name}: {n} at once, fanned out"),
                 }
+            }
+            Upgrade::UnlockSecondary(gun) => {
+                let name = gun_def(gun).name;
+                format!("Unlock Secondary: {name}")
             }
         }
     }

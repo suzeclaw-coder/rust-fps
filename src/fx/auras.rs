@@ -5,7 +5,7 @@
 //! glowing hands (see viewmodel.rs).
 
 use bevy::asset::RenderAssetUsages;
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rand::Rng;
@@ -286,10 +286,10 @@ fn shells(
         tf.scale =
             Vec3::new(1.0 + 0.05 * pulse, 1.0 + 0.02 * pulse, 1.0 + 0.05 * pulse) * (0.9 + 0.1 * k);
         let lin = LinearRgba::from(color);
-        if let Some(m) = materials.get_mut(&shell.mat) {
+        if let Some(mut m) = materials.get_mut(&shell.mat) {
             m.base_color = Color::LinearRgba(lin * (0.18 + 0.1 * pulse) * k);
         }
-        if let Some(m) = materials.get_mut(&shell.floor) {
+        if let Some(mut m) = materials.get_mut(&shell.floor) {
             m.base_color = Color::LinearRgba(lin * (0.35 + 0.15 * pulse) * k);
         }
     }

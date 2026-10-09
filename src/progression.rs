@@ -84,12 +84,21 @@ pub fn match_xp(rounds: u32, kills: u32, maps_cleared: u32, won: bool) -> u32 {
     rounds * 150 + kills * 3 + maps_cleared * 400 + if won { 1500 } else { 0 }
 }
 
-/// Are these guns (primary, secondary) ones the class can bring, with
-/// attachments they take?
-pub fn valid_class_guns(c: Character, guns: [(u8, Attach); 2]) -> bool {
+/// Are these guns (primary, secondary) valid loadout weapons with attachments that fit?
+pub fn valid_loadout_guns(guns: [(u8, Attach); 2]) -> bool {
     guns.iter().enumerate().all(|(slot, (g, a))| {
-        c.has_gun(slot, *g) && crate::data::attach_options_for(*g).fits(*a)
+        let is_valid = if slot == 0 {
+            crate::data::PRIMARY_GUNS.contains(g)
+        } else {
+            crate::data::SECONDARY_GUNS.contains(g)
+        };
+        is_valid && crate::data::attach_options_for(*g).fits(*a)
     })
+}
+
+#[allow(dead_code)]
+pub fn valid_class_guns(_c: Character, guns: [(u8, Attach); 2]) -> bool {
+    valid_loadout_guns(guns)
 }
 
 /// Turns attachments off that the player hasn't unlocked yet or that the

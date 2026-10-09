@@ -3,7 +3,7 @@
 //! falling from the sky (the Payload bomb, Arrow Storm arrows), the grapple
 //! hook, warning circles, and the trails thrown gadgets leave behind.
 
-use bevy::pbr::NotShadowCaster;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
@@ -1697,7 +1697,7 @@ pub fn trails(
             look::DART => lines.0.push((prev, pos, Color::srgba(0.7, 1.0, 0.3, 0.5), 0.12)),
             look::STICKY => {
                 // A blinking red light.
-                let phase = t * 3.0 + e.index() as f32 * 0.37;
+                let phase = t * 3.0 + e.index().index() as f32 * 0.37;
                 if phase.fract() < dt * 3.0 {
                     bit(&mut commands, &a.ball, &s.red, pos + Vec3::Y * 0.12, Vec3::ZERO, 0.15, 0.0, 0.0, (0.08, 0.06));
                 }
