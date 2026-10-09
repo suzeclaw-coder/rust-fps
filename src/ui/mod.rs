@@ -1553,7 +1553,8 @@ fn lobby_screen(
         let blurb = match state.map {
             0 => "Container stacks, cranes and narrow lanes.",
             1 => "Open lawns, trees, a pond and a bandstand.",
-            _ => "Houses, fences and a cul-de-sac.",
+            2 => "Houses, fences and a cul-de-sac.",
+            _ => "A coastal fishing village, wooden pier and market stalls.",
         };
         label(p, blurb, 15.0, DIM);
         if state.sandbox.on {

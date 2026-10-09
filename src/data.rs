@@ -2140,7 +2140,7 @@ pub const STAGES: u8 = 5;
 pub const ROUNDS_PER_STAGE: u32 = 4;
 
 /// Boss names: one per map, then the final boss.
-pub const BOSS_NAMES: [&str; 3] = ["The Foreman", "The Groundskeeper", "The Landlord"];
+pub const BOSS_NAMES: [&str; 4] = ["The Foreman", "The Groundskeeper", "The Landlord", "The Harbourmaster"];
 pub const FINAL_BOSS_NAME: &str = "The Abomination";
 
 pub fn boss_name(map: u8, final_boss: bool) -> &'static str {

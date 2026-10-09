@@ -297,22 +297,61 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         bright,
         echo,
     };
+    // Load high-fidelity Foley and acoustic sample buffers
+    let sample = |bytes: &[u8]| Buf::from_wav_pcm16(bytes);
+    let s_pistol = sample(include_bytes!("assets/pistol-shot.wav"));
+    let s_rifle = sample(include_bytes!("assets/rifle-shot.wav"));
+    let s_shotgun = sample(include_bytes!("assets/shotgun-shot.wav"));
+    let s_smg = sample(include_bytes!("assets/smg-shot.wav"));
+    let s_exp = sample(include_bytes!("assets/grenade-explosion.wav"));
+    let s_exp_dist = sample(include_bytes!("assets/grenade-distant.wav"));
+    let s_hit = sample(include_bytes!("assets/hit.wav"));
+    let s_impact = sample(include_bytes!("assets/impact.wav"));
+    let s_kill = sample(include_bytes!("assets/kill.wav"));
+    let s_mag_in = sample(include_bytes!("assets/reload-in.wav"));
+    let s_mag_out = sample(include_bytes!("assets/reload-out.wav"));
+    let s_bolt = sample(include_bytes!("assets/reload-bolt.wav"));
+    let s_pistol_in = sample(include_bytes!("assets/pistol-in.wav"));
+    let s_pistol_out = sample(include_bytes!("assets/pistol-out.wav"));
+    let s_pump = sample(include_bytes!("assets/shotgun-pump.wav"));
+    let s_shell1 = sample(include_bytes!("assets/shell-1.wav"));
+    let s_shell2 = sample(include_bytes!("assets/shell-2.wav"));
+    let s_step1 = sample(include_bytes!("assets/step-1.wav"));
+    let s_step2 = sample(include_bytes!("assets/step-2.wav"));
+    let s_step3 = sample(include_bytes!("assets/step-3.wav"));
+    let s_step4 = sample(include_bytes!("assets/step-4.wav"));
+    let s_ui_confirm = sample(include_bytes!("assets/ui-confirm.wav"));
+    let s_ui_cancel = sample(include_bytes!("assets/ui-cancel.wav"));
+    let s_ui_round = sample(include_bytes!("assets/ui-round.wav"));
+
     for i in 0..3 {
         let seed = 100 + i * 17;
-        out_bank.entry(ShotPistol).or_default().push(pistol_shot_reverb(seed, false));
-        ind_bank.entry(ShotPistol).or_default().push(pistol_shot_reverb(seed, true));
+        // Layer authentic pistol sample transient and body with procedural room acoustics
+        let p_out = pistol_shot_reverb(seed, false).mix(&s_pistol, 0.0, 0.85).normalize(0.97);
+        let p_ind = pistol_shot_reverb(seed, true).mix(&s_pistol, 0.0, 0.75).normalize(0.97);
+        out_bank.entry(ShotPistol).or_default().push(p_out);
+        ind_bank.entry(ShotPistol).or_default().push(p_ind);
 
         out_bank.entry(ShotMagnum).or_default().push(magnum_shot_reverb(seed + 1, false));
         ind_bank.entry(ShotMagnum).or_default().push(magnum_shot_reverb(seed + 1, true));
 
-        out_bank.entry(ShotSmg).or_default().push(smg_shot_reverb(seed + 2, false));
-        ind_bank.entry(ShotSmg).or_default().push(smg_shot_reverb(seed + 2, true));
+        // Layer authentic SMG crack with rapid cycling
+        let smg_out = smg_shot_reverb(seed + 2, false).mix(&s_smg, 0.0, 0.82).normalize(0.96);
+        let smg_ind = smg_shot_reverb(seed + 2, true).mix(&s_smg, 0.0, 0.72).normalize(0.96);
+        out_bank.entry(ShotSmg).or_default().push(smg_out);
+        ind_bank.entry(ShotSmg).or_default().push(smg_ind);
 
-        out_bank.entry(ShotRifle).or_default().push(rifle_shot_reverb(seed + 3, false));
-        ind_bank.entry(ShotRifle).or_default().push(rifle_shot_reverb(seed + 3, true));
+        // Layer authentic military assault rifle report with procedural outdoor/indoor tail
+        let rifle_out = rifle_shot_reverb(seed + 3, false).mix(&s_rifle, 0.0, 0.90).normalize(0.98);
+        let rifle_ind = rifle_shot_reverb(seed + 3, true).mix(&s_rifle, 0.0, 0.80).normalize(0.98);
+        out_bank.entry(ShotRifle).or_default().push(rifle_out);
+        ind_bank.entry(ShotRifle).or_default().push(rifle_ind);
 
-        out_bank.entry(ShotShotgun).or_default().push(shotgun_shot_reverb(seed + 4, false));
-        ind_bank.entry(ShotShotgun).or_default().push(shotgun_shot_reverb(seed + 4, true));
+        // Layer authentic 12-gauge shotgun blast with wide spread wallop
+        let sg_out = shotgun_shot_reverb(seed + 4, false).mix(&s_shotgun, 0.0, 0.95).normalize(0.99);
+        let sg_ind = shotgun_shot_reverb(seed + 4, true).mix(&s_shotgun, 0.0, 0.85).normalize(0.99);
+        out_bank.entry(ShotShotgun).or_default().push(sg_out);
+        ind_bank.entry(ShotShotgun).or_default().push(sg_ind);
 
         out_bank.entry(ShotLmg).or_default().push(lmg_shot_reverb(seed + 5, false));
         ind_bank.entry(ShotLmg).or_default().push(lmg_shot_reverb(seed + 5, true));
@@ -342,20 +381,27 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         ind_bank.entry(s).or_default().push(b);
     };
     add(DryFire, click(2800.0, 5, 0.06));
-    for i in 0..2 {
-        add(MagOut, mag_out(200 + i));
-        add(MagIn, mag_in(210 + i));
-        add(Bolt, bolt(220 + i));
-        add(Shell, shell(230 + i));
-    }
+    add(MagOut, mag_out(200).mix(&s_mag_out, 0.0, 0.85).normalize(0.65));
+    add(MagOut, mag_out(201).mix(&s_pistol_out, 0.0, 0.85).normalize(0.65));
+    add(MagIn, mag_in(210).mix(&s_mag_in, 0.0, 0.85).normalize(0.7));
+    add(MagIn, mag_in(211).mix(&s_pistol_in, 0.0, 0.85).normalize(0.7));
+    add(Bolt, bolt(220).mix(&s_bolt, 0.0, 0.9).normalize(0.75));
+    add(Bolt, bolt(221).mix(&s_pump, 0.0, 0.85).normalize(0.75));
+    add(Shell, shell(230).mix(&s_shell1, 0.0, 0.9).normalize(0.6));
+    add(Shell, shell(231).mix(&s_shell2, 0.0, 0.9).normalize(0.6));
     add(
         Swap,
         whoosh(0.18, 600.0, 1400.0, 9)
             .mix(&click(2400.0, 10, 0.05), 0.12, 0.8)
-            .normalize(0.5),
+            .mix(&s_bolt, 0.04, 0.45)
+            .normalize(0.55),
     );
+    add(Step, step_surface(300, Surface::Concrete).mix(&s_step1, 0.0, 0.75).normalize(0.5));
+    add(Step, step_surface(301, Surface::Concrete).mix(&s_step2, 0.0, 0.75).normalize(0.5));
+    add(Step, step_surface(302, Surface::Concrete).mix(&s_step3, 0.0, 0.75).normalize(0.5));
+    add(Step, step_surface(303, Surface::Concrete).mix(&s_step4, 0.0, 0.75).normalize(0.5));
+    add(Step, step_surface(304, Surface::Concrete));
     for i in 0..5 {
-        add(Step, step_surface(300 + i, Surface::Concrete));
         add(StepSoft, step_surface(320 + i, Surface::Grass));
         add(StepMetal, step_surface(340 + i, Surface::Metal));
         add(StepPuddle, step_surface(360 + i, Surface::Puddle));
@@ -370,15 +416,15 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     add(
         Land,
         thud(70.0, 0.25, 13)
-            .mix(&step(14, false), 0.0, 1.0)
+            .mix(&s_step1, 0.0, 0.8)
             .normalize(0.7),
     );
     add(Slide, whoosh(0.6, 500.0, 1800.0, 15));
     for i in 0..3 {
-        add(HitTick, hitmarker_tick(140 + i));
-        add(HitHead, headshot_ding(150 + i));
+        add(HitTick, hitmarker_tick(140 + i).mix(&s_hit, 0.0, 0.8).normalize(0.94));
+        add(HitHead, headshot_ding(150 + i).mix(&s_impact, 0.0, 0.75).normalize(0.96));
         add(HitHead, skull_pop(155 + i));
-        add(Kill, kill_sound(160 + i));
+        add(Kill, kill_sound(160 + i).mix(&s_kill, 0.0, 0.85).normalize(0.96));
     }
 
     // Zombie voices: pitch, formants and rasp vary per variant.
@@ -528,9 +574,9 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
             .normalize(0.7),
         );
     }
-    add(Explosion, explosion(500, 1.0));
-    add(Explosion, explosion(501, 1.0));
-    add(BigExplosion, explosion(502, 1.8));
+    add(Explosion, explosion(500, 1.0).mix(&s_exp, 0.0, 0.9).normalize(0.99));
+    add(Explosion, explosion(501, 1.0).mix(&s_exp_dist, 0.0, 0.85).normalize(0.99));
+    add(BigExplosion, explosion(502, 1.8).mix(&s_exp, 0.0, 1.1).normalize(1.0));
     add(Slam, boss_slam(505));
     add(Slam, slam(506));
     add(Fire, fire(510, 1.0));
@@ -653,6 +699,7 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
                 0.0,
                 0.6,
             )
+            .mix(&s_ui_round, 0.0, 0.8)
             .normalize(0.95),
     );
     for i in 0..2 {
@@ -679,7 +726,8 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         Extract,
         chime_up(523.0, &[1.0, 1.26, 1.5, 2.0, 2.52, 3.0, 4.0], 0.11),
     );
-    add(UiClick, click(3500.0, 700, 0.04));
+    add(UiClick, click(3500.0, 700, 0.04).mix(&s_ui_confirm, 0.0, 0.75).normalize(0.6));
+    add(Deny, s_ui_cancel.normalize(0.6));
     add(CrateTick, click(1900.0, 710, 0.05));
     add(CrateReveal, chime_up(1047.0, &[1.0, 1.5, 2.0], 0.06));
     add(
@@ -1041,8 +1089,8 @@ fn movement_sounds(
     let p = *player;
     let surface = map.as_ref().map_or(Surface::Concrete, |m| m.0.surface_at(p.feet));
     let step = match surface {
-        Surface::Concrete => Snd::Step,
-        Surface::Grass => Snd::StepSoft,
+        Surface::Concrete | Surface::Wood => Snd::Step,
+        Surface::Grass | Surface::Sand => Snd::StepSoft,
         Surface::Metal => Snd::StepMetal,
         Surface::Puddle => Snd::StepPuddle,
     };
@@ -1118,8 +1166,8 @@ fn movement_sounds(
             entry.1 = 0.0;
             let team_surface = map.as_ref().map_or(Surface::Concrete, |m| m.0.surface_at(feet));
             let team_step = match team_surface {
-                Surface::Concrete => Snd::Step,
-                Surface::Grass => Snd::StepSoft,
+                Surface::Concrete | Surface::Wood => Snd::Step,
+                Surface::Grass | Surface::Sand => Snd::StepSoft,
                 Surface::Metal => Snd::StepMetal,
                 Surface::Puddle => Snd::StepPuddle,
             };

@@ -11,7 +11,7 @@ use crate::avatars::spawn_replicated;
 use crate::data::{
     alt_fire, elements_in, gun_def, has_perk, roll_armory, tier_mult, AltFire, Attach,
     GRENADE_RECHARGE,
-    xp_to_next, Ability, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
+    xp_to_next, Ability, Element, GunClass, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
     ROUNDS_PER_STAGE, STAGES,
     MAX_AUGMENT, MAX_GUN_TIER, MAX_TIER,
 };
@@ -534,7 +534,7 @@ fn process_actions(
                 };
             }
             PlayerAction::WeaponAbility(_) => {}
-            PlayerAction::Ping { pos, target } => {
+            PlayerAction::Ping { pos, target, kind } => {
                 if pos.iter().all(|v| v.is_finite()) {
                     emit(
                         &mut fx,
@@ -543,6 +543,7 @@ fn process_actions(
                             player: id,
                             pos,
                             target,
+                            kind,
                         },
                     );
                 }
@@ -877,7 +878,25 @@ fn resolve_shots(
             1.0
         };
         let headshot_mult = if headshot { def.headshot } else { 1.0 };
-        let mut amount = def.damage * mult * pellets * headshot_mult;
+        // Ballistics range drop-off:
+        // Shotguns experience steep dropoff beyond 10m down to 25% at 32m (as in sandline-threejs-fps);
+        // other firearms maintain effective stopping power with subtle dropoff at long distances (>25m).
+        let range_falloff = if def.class == GunClass::Shotgun && alt != AltFire::Slug {
+            if hit.dist > 10.0 {
+                (1.0 - (hit.dist - 10.0) / 22.0).clamp(0.25, 1.0)
+            } else {
+                1.0
+            }
+        } else if def.class == GunClass::Pistol || def.class == GunClass::Smg {
+            if hit.dist > 25.0 {
+                (1.0 - (hit.dist - 25.0) / 50.0).clamp(0.60, 1.0)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        let mut amount = def.damage * mult * pellets * headshot_mult * range_falloff;
         if hit.penetrated {
             amount *= crate::physics::PENETRATION_DAMAGE_FACTOR;
         }

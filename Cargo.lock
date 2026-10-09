@@ -4356,6 +4356,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "radial-menu-rs"
+version = "0.1.1"
+dependencies = [
+ "glam",
+ "serde",
+]
+
+[[package]]
 name = "radsort"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4566,9 +4574,11 @@ dependencies = [
  "arboard",
  "bevy",
  "bincode",
+ "radial-menu-rs",
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "vhud-rs",
 ]
 
 [[package]]
@@ -5289,6 +5299,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vhud-rs"
+version = "0.1.1"
+dependencies = [
+ "glam",
+ "serde",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "walkdir"

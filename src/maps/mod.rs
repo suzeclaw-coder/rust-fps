@@ -9,8 +9,11 @@ pub mod interiors;
 pub mod nav;
 pub mod props;
 pub mod strips;
+pub mod tidewater_props;
+pub mod tidewater;
 
 use bevy::prelude::*;
+use bevy::asset::RenderAssetUsages;
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use crate::data::Perk;
@@ -19,7 +22,7 @@ use interiors::{look, Finish, Floor, Plan, Room};
 use props::{boxr, hash, shade, v, Art};
 use crate::{Collider, InGameEntity};
 
-pub const MAP_NAMES: [&str; 3] = ["Shipping Yard", "Central Park", "The Neighborhood"];
+pub const MAP_NAMES: [&str; 4] = ["Shipping Yard", "Central Park", "The Neighborhood", "Tidewater"];
 
 pub fn map_name(id: u8) -> &'static str {
     MAP_NAMES[(id as usize).min(MAP_NAMES.len() - 1)]
@@ -38,6 +41,7 @@ pub struct Solid {
 pub enum Ground {
     Asphalt,
     Grass,
+    Sand,
 }
 
 /// Half size of the whole map.
@@ -138,19 +142,20 @@ impl MapLayout {
         })
     }
 
+    pub const PUDDLE_SPOTS: [Vec3; 6] = [
+        Vec3::new(4.0, 0.015, -6.0),
+        Vec3::new(-12.0, 0.015, 14.0),
+        Vec3::new(-26.0, 0.015, -6.0),
+        Vec3::new(-8.0, 0.015, -18.0),
+        Vec3::new(2.0, 0.015, 48.0),
+        Vec3::new(-20.0, 0.015, 2.0),
+    ];
+
     /// Evaluates the ground material at a given position for footstep acoustics.
     pub fn surface_at(&self, pos: Vec3) -> crate::audio::synth::Surface {
         // 1. Puddle detection (reflective puddle quads on asphalt)
         if self.ground_kind == Ground::Asphalt {
-            const PUDDLE_SPOTS: [Vec3; 6] = [
-                Vec3::new(4.0, 0.02, -6.0),
-                Vec3::new(-12.0, 0.02, 14.0),
-                Vec3::new(18.0, 0.02, 8.0),
-                Vec3::new(-8.0, 0.02, -18.0),
-                Vec3::new(22.0, 0.02, -14.0),
-                Vec3::new(-20.0, 0.02, 2.0),
-            ];
-            for spot in &PUDDLE_SPOTS {
+            for spot in &Self::PUDDLE_SPOTS {
                 if pos.with_y(0.0).distance(spot.with_y(0.0)) < 3.2 {
                     return crate::audio::synth::Surface::Puddle;
                 }
@@ -162,12 +167,22 @@ impl MapLayout {
             return crate::audio::synth::Surface::Metal;
         }
 
-        // 3. Grass/dirt: outdoor grass map
+        // 3. Tidewater: beach sand, wooden piers, and shallows
+        if self.ground_kind == Ground::Sand {
+            if pos.y > 0.05 || self.is_indoor(pos) {
+                return crate::audio::synth::Surface::Wood;
+            } else if pos.y < -0.05 {
+                return crate::audio::synth::Surface::Puddle;
+            }
+            return crate::audio::synth::Surface::Sand;
+        }
+
+        // 4. Grass/dirt: outdoor grass map
         if self.ground_kind == Ground::Grass && !self.is_indoor(pos) {
             return crate::audio::synth::Surface::Grass;
         }
 
-        // 4. Default: Concrete/stone
+        // 5. Default: Concrete/stone
         crate::audio::synth::Surface::Concrete
     }
 
@@ -201,6 +216,7 @@ pub fn layout(map: u8) -> MapLayout {
     match map {
         1 => central_park(),
         2 => neighborhood(),
+        3 => tidewater::tidewater(),
         _ => shipping_yard(),
     }
 }
@@ -559,7 +575,7 @@ fn shipping_yard() -> MapLayout {
     let mut x = -34.0;
     while x <= 56.0 {
         if (x - 0.0f32).abs() > 4.0 {
-            m.bollard(x, -55.5);
+            m.old_bollard(x, -55.5);
         }
         x += 9.0;
     }
@@ -883,8 +899,8 @@ fn central_park() -> MapLayout {
 
     // Lakeside: a wading pond with a boardwalk, the café and boat shed.
     pond(&mut m, 18.0, -42.0, 34.0, -30.0);
-    m.rowboat(23.0, -36.0, 0.3, c(0.85, 0.85, 0.82));
-    m.rowboat(29.0, -34.0, -0.4, c(0.7, 0.15, 0.12));
+    m.old_rowboat(23.0, -36.0, 0.3, c(0.85, 0.85, 0.82));
+    m.old_rowboat(29.0, -34.0, -0.4, c(0.7, 0.15, 0.12));
     let mut a = Art::default();
     let plank = c(0.55, 0.4, 0.27);
     let mut x = 18.0;
@@ -900,7 +916,7 @@ fn central_park() -> MapLayout {
     m.park_lamp(16.0, -46.0);
     m.diner(&Room::new(38.2, -57.6, 47.8, -44.2, 5.0, &[(43.0, -44.0), (48.0, -48.5), (40.0, -56.9)]), 3.0);
     for (i, z) in [-56.0f32, -52.0].into_iter().enumerate() {
-        m.rowboat(53.0, z, FRAC_PI_2, [c(0.2, 0.35, 0.6), c(0.85, 0.75, 0.2)][i]);
+        m.old_rowboat(53.0, z, FRAC_PI_2, [c(0.2, 0.35, 0.6), c(0.85, 0.75, 0.2)][i]);
     }
     m.crates(55.5, -47.5, 5.0);
 
@@ -1596,6 +1612,28 @@ fn ground_texture(kind: Ground) -> Image {
                         [r, g, b]
                     }
                 }
+                Ground::Sand => {
+                    // Multi-octave wave & wind ripples in warm coral sand
+                    let ripple1 = vnoise(fx / 20.0, fy / 5.0, 8);
+                    let ripple2 = vnoise(fx / 7.0, fy / 3.0, 16);
+                    let ripple = ripple1 * 0.65 + ripple2 * 0.35;
+                    let micro = (grain - 0.5) * 0.035;
+                    let is_coral = grain > 0.982 && grain <= 0.995;
+                    let is_shell = grain > 0.995;
+                    let mut r = 0.90 + ripple * 0.045 + micro;
+                    let mut g = 0.80 + ripple * 0.035 + micro;
+                    let mut b = 0.67 + ripple * 0.025 + micro;
+                    if is_coral {
+                        r = 0.96;
+                        g = 0.68;
+                        b = 0.64;
+                    } else if is_shell {
+                        r = 0.98;
+                        g = 0.97;
+                        b = 0.94;
+                    }
+                    [r, g, b]
+                }
             };
             let i = (y * N + x) * 4;
             for c in 0..3 {
@@ -1645,6 +1683,220 @@ fn ground_texture(kind: Ground) -> Image {
     });
     image
 }
+
+/// Procedural organic puddle alpha mask texture so puddles have soft natural edges and no sharp quad borders.
+fn puddle_texture() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: usize = 128;
+    let mut data = vec![0u8; N * N * 4];
+    for y in 0..N {
+        for x in 0..N {
+            let u = (x as f32 / (N - 1) as f32) * 2.0 - 1.0;
+            let v = (y as f32 / (N - 1) as f32) * 2.0 - 1.0;
+            let d = (u * u + v * v).sqrt();
+            let angle = v.atan2(u);
+            let edge = 0.80 + 0.08 * (angle * 3.0).sin() + 0.05 * (angle * 5.0).cos();
+            let alpha = if d >= edge {
+                0.0
+            } else {
+                let t = ((edge - d) / 0.30).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t) * 0.75
+            };
+            let i = (y * N + x) * 4;
+            data[i] = 15;
+            data[i + 1] = 19;
+            data[i + 2] = 23;
+            data[i + 3] = (alpha * 255.0) as u8;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: N as u32,
+            height: N as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+/// Procedural tileable ocean wave ripple normal map.
+fn ocean_normal_texture() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: usize = 256;
+    let mut data = vec![0u8; N * N * 4];
+    for y in 0..N {
+        for x in 0..N {
+            let (fx, fy) = (x as f32, y as f32);
+            let h = |px: f32, py: f32| -> f32 {
+                vnoise(px / 16.0, py / 16.0, 8) * 0.45
+                    + vnoise(px / 8.0, py / 8.0, 16) * 0.35
+                    + vnoise(px / 4.0, py / 4.0, 32) * 0.20
+            };
+            let hc = h(fx, fy);
+            let hx = h(fx + 1.0, fy);
+            let hy = h(fx, fy + 1.0);
+            let dx = (hx - hc) * 3.5;
+            let dy = (hy - hc) * 3.5;
+            let normal = Vec3::new(-dx, -dy, 1.0).normalize();
+            let r = ((normal.x * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let g = ((normal.y * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let b = ((normal.z * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let i = (y * N + x) * 4;
+            data[i] = r;
+            data[i + 1] = g;
+            data[i + 2] = b;
+            data[i + 3] = 255;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: N as u32,
+            height: N as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+/// Builds a finely tessellated 2D grid plane mesh for real-time 3D wave animation.
+fn wave_grid_mesh(size: Vec2, segs: UVec2) -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    let (nx, nz) = (segs.x as usize, segs.y as usize);
+    let mut pos = Vec::with_capacity((nx + 1) * (nz + 1));
+    let mut normals = Vec::with_capacity((nx + 1) * (nz + 1));
+    let mut uvs = Vec::with_capacity((nx + 1) * (nz + 1));
+    for j in 0..=nz {
+        let v = j as f32 / nz as f32;
+        let z = (v - 0.5) * size.y;
+        for i in 0..=nx {
+            let u = i as f32 / nx as f32;
+            let x = (u - 0.5) * size.x;
+            pos.push([x, 0.0, z]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([u * (size.x / 8.0), v * (size.y / 8.0)]);
+        }
+    }
+    let mut idx = Vec::with_capacity(nx * nz * 6);
+    for j in 0..nz as u32 {
+        for i in 0..nx as u32 {
+            let a = j * (segs.x + 1) + i;
+            let b = a + 1;
+            let c = (j + 1) * (segs.x + 1) + i;
+            let d = c + 1;
+            idx.extend([a, c, b, b, c, d]);
+        }
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(idx))
+}
+
+/// Procedural tileable breaking surf foam texture with cellular foam froth and feathered wash.
+fn surf_foam_texture() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: usize = 256;
+    let mut data = vec![0u8; N * N * 4];
+    for y in 0..N {
+        let v = y as f32 / N as f32; // 0.0 = seaward crest, 1.0 = beach wash edge
+        for x in 0..N {
+            let fx = x as f32;
+            let fy = y as f32;
+            let n1 = vnoise(fx / 6.0, fy / 4.0, 16);
+            let n2 = vnoise(fx / 12.0, fy / 8.0, 8);
+            let n3 = vnoise(fx / 2.5, fy / 2.0, 32);
+            let froth = n1 * 0.5 + n2 * 0.35 + n3 * 0.15;
+
+            // Scalloped surf crest envelope: dense white foam along breaking front, trailing lace
+            let crest_envelope = (v * PI).sin().powf(0.85);
+            let lacing = if froth > 0.40 { 1.0 } else { (froth / 0.40).powf(2.0) };
+            let alpha = (crest_envelope * lacing * 1.25).clamp(0.0, 0.95);
+
+            let i = (y * N + x) * 4;
+            data[i] = 255;
+            data[i + 1] = 255;
+            data[i + 2] = 255;
+            data[i + 3] = (alpha * 255.0) as u8;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: N as u32,
+            height: N as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+/// Builds a sloping quad plane mesh along Z from y_top at +Z/2 to y_bottom at -Z/2.
+fn sloping_beach_mesh(size: Vec2, y_top: f32, y_bottom: f32) -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    let w = size.x / 2.0;
+    let d = size.y / 2.0;
+    let pos = vec![
+        [-w, y_top, d],
+        [w, y_top, d],
+        [-w, y_bottom, -d],
+        [w, y_bottom, -d],
+    ];
+    let dy = y_top - y_bottom;
+    let normal = Vec3::new(0.0, size.y, dy).normalize().to_array();
+    let normals = vec![normal; 4];
+    let uvs = vec![
+        [0.0, size.y / 7.0],
+        [size.x / 7.0, size.y / 7.0],
+        [0.0, 0.0],
+        [size.x / 7.0, 0.0],
+    ];
+    let idx = vec![0, 2, 1, 1, 2, 3];
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(idx))
+}
+
 
 /// A glowing "?" in the XY plane, facing +Z.
 fn question_mark(k: &mut Kit, size: f32, color: Color) {
@@ -2041,10 +2293,134 @@ pub fn spawn_map(
         })),
     ));
 
+    // For Tidewater (Ground::Sand): High quality PBR ocean surface, animated 3D waves, and breaking surf!
+    if layout.ground_kind == Ground::Sand {
+        let ocean_mat = materials.add(StandardMaterial {
+            base_color: if night {
+                Color::srgba(0.015, 0.06, 0.16, 0.94) // Deep starlit oceanic indigo
+            } else {
+                Color::srgba(0.04, 0.62, 0.74, 0.78) // Vibrant Caribbean turquoise / aquamarine
+            },
+            normal_map_texture: Some(images.add(ocean_normal_texture())),
+            perceptual_roughness: 0.03,
+            reflectance: 0.98,
+            metallic: 0.05,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 8.0,
+            cull_mode: None,
+            ..default()
+        });
+
+        // 1. Sprawling deep ocean stretching out south towards the horizon (-500m to -17m)
+        let deep_ocean_mat = materials.add(StandardMaterial {
+            base_color: if night {
+                Color::srgba(0.012, 0.04, 0.14, 0.96)
+            } else {
+                Color::srgba(0.02, 0.36, 0.58, 0.94) // Deep tropical azure / ultramarine ocean
+            },
+            normal_map_texture: Some(images.add(ocean_normal_texture())),
+            perceptual_roughness: 0.04,
+            reflectance: 0.96,
+            metallic: 0.05,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 6.0,
+            cull_mode: None,
+            ..default()
+        });
+        let ocean_w = 900.0;
+        let ocean_len = 500.0;
+        let mut ocean_plane = Plane3d::default().mesh().size(ocean_w, ocean_len).build();
+        scale_uvs(&mut ocean_plane, Vec2::new(ocean_w / 14.0, ocean_len / 14.0));
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(ocean_plane)),
+            MeshMaterial3d(deep_ocean_mat),
+            Transform::from_xyz(0.0, 0.04, -265.0),
+        ));
+
+        // 2. Animated near-shore bay & pier ocean mesh with undulating 3D swells
+        let wave_mesh = wave_grid_mesh(Vec2::new(140.0, 52.0), UVec2::new(56, 24));
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(wave_mesh)),
+            MeshMaterial3d(ocean_mat),
+            Transform::from_xyz(0.0, 0.05, -39.0),
+            crate::graphics::OceanWaves { base_y: 0.05 },
+        ));
+
+        // 3. Sandy seabed beneath the transparent turquoise water
+        let mut seabed = Plane3d::default().mesh().size(180.0, 100.0).build();
+        scale_uvs(&mut seabed, Vec2::new(180.0 / 7.0, 100.0 / 7.0));
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(seabed)),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.72, 0.64, 0.50),
+                base_color_texture: Some(images.add(ground_texture(Ground::Sand))),
+                perceptual_roughness: 0.95,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, -1.4, -55.0),
+        ));
+
+        // 4. Submerged beach slope transitioning from shoreline down to seabed
+        let beach_slope_mesh = sloping_beach_mesh(Vec2::new(180.0, 20.0), 0.0, -1.4);
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(beach_slope_mesh)),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.80, 0.72, 0.58),
+                base_color_texture: Some(images.add(ground_texture(Ground::Sand))),
+                perceptual_roughness: 0.95,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 0.0, -25.0),
+        ));
+
+        // 5. White surf / foam line breaking along the sandy beach shoreline
+        let surf_mat = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(images.add(surf_foam_texture())),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 18.0,
+            cull_mode: None,
+            ..default()
+        });
+        let surf_mesh = Plane3d::default().mesh().size(160.0, 4.0).build();
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(surf_mesh)),
+            MeshMaterial3d(surf_mat),
+            Transform::from_xyz(0.0, 0.07, -16.5),
+            bevy::light::NotShadowCaster,
+        ));
+
+        // 6. Wet sand wash line ribbon along the tide edge (Z = -15.5)
+        let wet_sand_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.72, 0.62, 0.48, 0.92),
+            perceptual_roughness: 0.12,
+            reflectance: 0.85,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 14.0,
+            cull_mode: None,
+            ..default()
+        });
+        let wet_sand_mesh = Plane3d::default().mesh().size(160.0, 2.5).build();
+        commands.spawn((
+            InGameEntity,
+            Mesh3d(meshes.add(wet_sand_mesh)),
+            MeshMaterial3d(wet_sand_mat),
+            Transform::from_xyz(0.0, 0.03, -15.5),
+            bevy::light::NotShadowCaster,
+        ));
+    }
+
     let grime_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.08, 0.08, 0.07, 0.85),
         perceptual_roughness: 0.98,
         reflectance: 0.1,
+        depth_bias: 5.0,
         ..default()
     });
 
@@ -2071,30 +2447,28 @@ pub fn spawn_map(
                     MeshMaterial3d(grime_mat.clone()),
                     Transform::from_xyz(s.pos.x, 0.06, s.pos.z),
                     bevy::light::NotShadowCaster,
+                    bevy::light::NotShadowReceiver,
                 ));
             }
         }
     }
 
-    // Reflective planar puddles on asphalt / street surfaces
+    // Reflective planar puddles on asphalt / street surfaces (outdoors only, soft organic mask, depth-biased)
     if layout.ground_kind == Ground::Asphalt {
         let puddle_mat = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.05, 0.07, 0.09, 0.9),
-            perceptual_roughness: 0.04,
+            base_color: Color::WHITE,
+            base_color_texture: Some(images.add(puddle_texture())),
+            perceptual_roughness: 0.05,
             reflectance: 0.95,
             alpha_mode: AlphaMode::Blend,
+            depth_bias: 20.0,
             cull_mode: None,
             ..default()
         });
-        let puddle_spots = [
-            Vec3::new(4.0, 0.02, -6.0),
-            Vec3::new(-12.0, 0.02, 14.0),
-            Vec3::new(18.0, 0.02, 8.0),
-            Vec3::new(-8.0, 0.02, -18.0),
-            Vec3::new(22.0, 0.02, -14.0),
-            Vec3::new(-20.0, 0.02, 2.0),
-        ];
-        for (i, spot) in puddle_spots.iter().enumerate() {
+        for (i, spot) in MapLayout::PUDDLE_SPOTS.iter().enumerate() {
+            if layout.is_indoor(*spot) {
+                continue;
+            }
             let sx = 3.5 + (i as f32 * 1.7).sin().abs() * 2.5;
             let sz = 2.8 + (i as f32 * 2.3).cos().abs() * 2.0;
             let rot = Quat::from_rotation_y(i as f32 * 0.8);
@@ -2104,6 +2478,7 @@ pub fn spawn_map(
                 MeshMaterial3d(puddle_mat.clone()),
                 Transform::from_translation(*spot).with_rotation(rot),
                 bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
             ));
         }
     }
@@ -2121,7 +2496,9 @@ pub fn spawn_map(
         cull_mode: None,
         ..default()
     });
-    let ray_mesh = meshes.add(Cylinder::new(1.4, 6.0));
+    let mut ray_builder = Cylinder::new(1.4, 6.0).mesh();
+    ray_builder.caps = false;
+    let ray_mesh = meshes.add(ray_builder.build());
 
     // At night the lamps do the work: brighter and reaching further.
     let (lamp, reach) = if night { (3.0, 24.0) } else { (1.0, 18.0) };
@@ -2155,21 +2532,36 @@ pub fn spawn_map(
                 InGameEntity,
                 Mesh3d(ray_mesh.clone()),
                 MeshMaterial3d(god_ray_mat.clone()),
-                Transform::from_xyz(pos.x, h * 0.5, pos.z).with_scale(Vec3::new(1.0 + h * 0.2, h / 6.0, 1.0 + h * 0.2)),
+                Transform::from_xyz(pos.x, h * 0.5 + 0.05, pos.z).with_scale(Vec3::new(1.0 + h * 0.2, (h - 0.1) / 6.0, 1.0 + h * 0.2)),
                 bevy::light::NotShadowCaster,
                 bevy::light::NotShadowReceiver,
             ));
         }
     }
 
-    // Sun by day, a pale moon by night. The sun is a little warm; a weak
-    // cool light from the opposite side of the sky fills the shadows.
+    // Sun by day, a pale moon by night.
+    let is_sand = layout.ground_kind == Ground::Sand;
     let (sun, sun_color) = if night {
-        (layout.sun * 0.06, Color::srgb(0.6, 0.7, 1.0))
+        if is_sand {
+            (layout.sun * 0.07, Color::srgb(0.55, 0.70, 1.0))
+        } else {
+            (layout.sun * 0.06, Color::srgb(0.6, 0.7, 1.0))
+        }
     } else {
-        (layout.sun * SUN_BOOST, Color::srgb(1.0, 0.95, 0.86))
+        if is_sand {
+            // Late-afternoon tropical sun (~4:12 PM):
+            // Warm golden sunlight tone, high intensity, casting long crisp shadows Eastward across the sand
+            (layout.sun * 0.92, Color::srgb(1.0, 0.92, 0.78))
+        } else {
+            (layout.sun * SUN_BOOST, Color::srgb(1.0, 0.95, 0.86))
+        }
     };
-    let sun_pos = Vec3::new(20.0, 40.0, 15.0);
+    // Azimuth ~250° (West-Southwest), elevation ~27° above horizon for Tidewater
+    let sun_pos = if is_sand {
+        Vec3::new(-67.0, 36.3, -24.4)
+    } else {
+        Vec3::new(20.0, 40.0, 15.0)
+    };
     commands.spawn((
         InGameEntity,
         DirectionalLight {
@@ -2178,19 +2570,33 @@ pub fn spawn_map(
             shadow_maps_enabled: true,
             ..default()
         },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.1,
+            maximum_distance: if is_sand { 200.0 } else { 120.0 },
+            first_cascade_far_bound: 14.0,
+            overlap_proportion: 0.25,
+        }
+        .build(),
         Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     if !night {
+        let (fill_pos, fill_color, fill_intensity) = if is_sand {
+            // Cool cyan/sky ambient bounce opposite the warm late-afternoon sun
+            (Vec3::new(60.0, 32.0, 22.0), Color::srgb(0.65, 0.86, 1.0), layout.sun * 0.20)
+        } else {
+            (Vec3::new(-20.0, 30.0, -15.0), Color::srgb(0.82, 0.87, 1.0), layout.sun * FILL)
+        };
         commands.spawn((
             InGameEntity,
             crate::graphics::FillLight,
             DirectionalLight {
-                illuminance: layout.sun * FILL,
-                color: Color::srgb(0.82, 0.87, 1.0),
+                illuminance: fill_intensity,
+                color: fill_color,
                 shadow_maps_enabled: false,
                 ..default()
             },
-            Transform::from_xyz(-20.0, 30.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Transform::from_translation(fill_pos).looking_at(Vec3::ZERO, Vec3::Y),
         ));
     }
     crate::graphics::spawn_sky(commands, meshes, materials, layout.sky, night, sun_pos);
@@ -2373,7 +2779,7 @@ mod tests {
         assert!(m.upgrade_stations.is_empty());
         assert!(!m.near_upgrade_station(Vec3::ZERO));
 
-        for map_id in 0..3 {
+        for map_id in 0..4 {
             let layout = layout(map_id);
             assert!(
                 !layout.upgrade_stations.is_empty() && layout.upgrade_stations.len() <= 2,

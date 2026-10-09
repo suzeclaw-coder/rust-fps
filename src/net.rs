@@ -81,7 +81,7 @@ pub fn parse_args() -> Launch {
                 launch.map = args
                     .next()
                     .and_then(|m| m.parse().ok())
-                    .map(|m: u8| m.min(2))
+                    .map(|m: u8| m.min((crate::maps::MAP_NAMES.len() - 1) as u8))
             }
             "--start" => launch.start = true,
             "--night" => launch.night = true,
@@ -1279,6 +1279,7 @@ mod tests {
             player: 1,
             pos: [10.0, 0.0, -5.0],
             target: 42,
+            kind: 1,
         });
         let power_ev = NetEvent::PowerUpGrabbed {
             player: 2,
@@ -1315,6 +1316,7 @@ mod tests {
                     player: 0,
                     pos: [0.0; 3],
                     target: u32::MAX,
+                    kind: 0,
                 }),
             ),
             (

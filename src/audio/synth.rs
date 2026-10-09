@@ -642,6 +642,10 @@ pub enum Surface {
     Metal,
     /// Squishy splash transient.
     Puddle,
+    /// Soft granular crunch / sinking footstep.
+    Sand,
+    /// Resonant, hollow timber board clack.
+    Wood,
 }
 
 /// Dynamic procedural footstep tailored to ground material.
@@ -728,6 +732,34 @@ pub fn step_surface(seed: u32, surface: Surface) -> Buf {
                 drop_snap + splash + slosh + plop
             })
             .normalize(0.55)
+        }
+        Surface::Sand => {
+            let mut n = Noise::new(seed);
+            let mut bp_crunch = Bp::new();
+            let mut lp_sink = Lp::new();
+            render(0.18, |t| {
+                let x = n.next();
+                // Granular sand crunch
+                let crunch = bp_crunch.run(x, 2400.0, 1.2) * decay(t, 0.04) * 1.6;
+                // Soft low-end sinking
+                let sink = lp_sink.run(x, 400.0) * decay(t, 0.06) * 1.2;
+                crunch + sink
+            })
+            .normalize(0.45)
+        }
+        Surface::Wood => {
+            let mut n = Noise::new(seed);
+            let mut bp_clack = Bp::new();
+            let mut lp_body = Lp::new();
+            render(0.16, |t| {
+                let x = n.next();
+                // Sharp timber clack
+                let clack = bp_clack.run(x, 1200.0, 2.5) * decay(t, 0.02) * 2.0;
+                // Resonant hollow body
+                let body = lp_body.run(x, 300.0) * decay(t, 0.08) * 1.5;
+                clack + body
+            })
+            .normalize(0.6)
         }
     }
 }
@@ -1560,4 +1592,18 @@ pub fn wail(len: f32, seed: u32) -> Buf {
         (tone + air) * (k * std::f32::consts::PI).sin()
     })
     .normalize(0.6)
+}
+
+impl Buf {
+    pub fn from_wav_pcm16(bytes: &[u8]) -> Self {
+        let mut f32_samples = Vec::new();
+        if bytes.len() > 44 {
+            let data = &bytes[44..];
+            for chunk in data.chunks_exact(2) {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                f32_samples.push(sample as f32 / 32768.0);
+            }
+        }
+        Buf(f32_samples)
+    }
 }

@@ -119,6 +119,8 @@ pub struct Loadout {
     /// trigger has been held (auto guns drift sideways the longer you hold).
     climb: f32,
     pub spray: u32,
+    /// CS-style dynamic continuous fire spread accumulation with fast decay on release
+    pub continuous_spread: f32,
     /// Melee: seconds into the swing (None when not swinging), the cooldown,
     /// and whether this swing has landed yet.
     pub melee: Option<f32>,
@@ -517,7 +519,8 @@ pub fn fire(
     if loadout.recoil < 0.001 {
         loadout.recoil = 0.0;
     }
-    loadout.flash -= dt;
+    // Continuous fire spread decays smoothly at 0.09/sec when not shooting (fast decay on release)
+    loadout.continuous_spread = (loadout.continuous_spread - dt * 0.09).max(0.0);
     // Once the trigger is let go the muzzle smoothly recovers back down.
     let (cam_tf, p) = &mut *player;
     let cam_tf = **cam_tf;
@@ -641,17 +644,17 @@ pub fn fire(
     let forward = cam.forward().as_vec3();
     let right = cam.right().as_vec3();
     let up = cam.up().as_vec3();
-    let mut spread = def.spread;
-    if def.pellets == 1 {
-        if !p.on_ground {
-            spread += 0.03;
-        } else if p.horizontal_speed() > 1.0 {
-            spread += if p.sprinting { 0.015 } else { 0.008 };
-        }
-        if p.crouching {
-            spread *= 0.6;
-        }
-    }
+    // CS-style spread accumulation: base + movement penalty + continuous fire heat
+    let move_penalty = if !p.on_ground {
+        0.03
+    } else if p.horizontal_speed() > 1.0 {
+        if p.sprinting { 0.026 } else { 0.014 }
+    } else {
+        0.0
+    };
+    let crouch_mult = if p.crouching { 0.55 } else { 1.0 };
+    let mut spread = (def.spread + loadout.continuous_spread + move_penalty) * crouch_mult;
+
     // Aimed shots are much tighter; the laser tightens hip fire.
     let handling = gun.attach.handling(gun.id);
     let hip = handling.hip_spread;
@@ -687,6 +690,14 @@ pub fn fire(
     p.yaw -= side;
     loadout.climb += climb;
     loadout.spray += 1;
+    // Accumulate continuous fire spread up to cap (CS-style heat accumulation)
+    let spread_step = match def.class {
+        GunClass::Shotgun => 0.018,
+        GunClass::Sniper => 0.025,
+        GunClass::Pistol => 0.008,
+        _ => 0.011,
+    };
+    loadout.continuous_spread = (loadout.continuous_spread + spread_step).min(0.09);
     p.kick += rc.kick * handling.recoil_up * steady;
 
     let boxes = collect_boxes(colliders.iter());

@@ -38,7 +38,9 @@ mod physics;
 mod pings;
 mod player;
 mod progression;
+pub mod radial;
 mod ragdoll;
+mod radar;
 mod rig;
 mod sim;
 mod ui;
@@ -520,10 +522,11 @@ pub enum PlayerAction {
     BuyUpgrade(Upgrade),
     /// Use weapon ability 0 or 1 (keys 3 and 4).
     WeaponAbility(u8),
-    /// Mark a spot (or an enemy by net id; u32::MAX for none).
+    /// Mark a spot (or an enemy by net id; u32::MAX for none) with a ping kind.
     Ping {
         pos: [f32; 3],
         target: u32,
+        kind: u8,
     },
     Dev(DevCmd),
 }
@@ -712,6 +715,7 @@ fn main() {
         graphics::GraphicsPlugin,
         emotes::EmotePlugin,
         pings::PingPlugin,
+        radar::RadarPlugin,
     ))
     .run();
 }

@@ -25,12 +25,46 @@ impl Plugin for GraphicsPlugin {
         app.insert_resource(DirectionalLightShadowMap { size: 2048 })
             .add_systems(
                 Update,
-                (apply_camera, apply_sun, update_camera_mood, update_flicker_lights),
+                (apply_camera, apply_sun, update_camera_mood, update_flicker_lights, update_ocean_waves),
             )
             .add_systems(
                 PostUpdate,
                 follow_sky.before(bevy::transform::TransformSystems::Propagate),
             );
+    }
+}
+
+/// Dynamic 3D undulating ocean waves component.
+#[derive(Component)]
+pub struct OceanWaves {
+    pub base_y: f32,
+}
+
+pub fn update_ocean_waves(
+    time: Res<Time>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    query: Query<(&Mesh3d, &OceanWaves)>,
+) {
+    let t = time.elapsed_secs();
+    for (mesh_handle, waves) in &query {
+        let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) else { continue };
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+
+        for pos in positions.iter_mut() {
+            let x = pos[0];
+            let z = pos[2];
+            // Primary rolling swell rolling into the bay from south (+z direction in local coords)
+            let w1 = (z * 0.14 + x * 0.04 - t * 2.2).sin() * 0.16;
+            // Secondary cross swell
+            let w2 = (z * 0.28 - x * 0.12 - t * 3.4).sin() * 0.08;
+            // High frequency surface chop
+            let w3 = (x * 0.45 + z * 0.35 + t * 4.8).cos() * 0.035;
+            pos[1] = waves.base_y + w1 + w2 + w3;
+        }
     }
 }
 
@@ -100,15 +134,16 @@ const SATURATION: f32 = 0.95;
 /// leans warm, the Shipping Yard cool.
 fn map_grade(map: u8, night: bool) -> (f32, f32) {
     // Bevy's white balance is strong: 0.1 is already a heavy tint.
-    let warmth = match map {
-        0 => -0.015,
-        1 => 0.005,
-        _ => 0.025,
+    let (warmth, sat) = match map {
+        0 => (-0.015, SATURATION),
+        1 => (0.005, SATURATION),
+        3 => (0.022, 1.05), // rich tropical golden hour warmth & vivid ocean saturation
+        _ => (0.025, SATURATION),
     };
     if night {
-        (warmth * 0.5 - 0.01, SATURATION)
+        (warmth * 0.5 - 0.01, sat)
     } else {
-        (warmth, SATURATION)
+        (warmth, sat)
     }
 }
 
@@ -301,6 +336,25 @@ pub fn map_fog(map: u8, night: bool, clear_color: Color) -> DistanceFog {
             directional_light_color: Color::srgba(0.14, 0.16, 0.24, 0.65),
             directional_light_exponent: 16.0,
             falloff: FogFalloff::from_visibility_squared(32.0),
+        },
+        // Tidewater (Map 3): Crystal-clear Caribbean tropical atmosphere, long ocean horizon visibility
+        (3, false) => DistanceFog {
+            color: Color::srgb(0.55, 0.78, 0.92),
+            directional_light_color: Color::srgba(1.0, 0.96, 0.88, 0.25),
+            directional_light_exponent: 14.0,
+            falloff: FogFalloff::Linear {
+                start: 220.0,
+                end: 650.0,
+            },
+        },
+        (3, true) => DistanceFog {
+            color: Color::srgb(0.012, 0.02, 0.045),
+            directional_light_color: Color::srgba(0.25, 0.38, 0.55, 0.6),
+            directional_light_exponent: 12.0,
+            falloff: FogFalloff::Linear {
+                start: 120.0,
+                end: 380.0,
+            },
         },
         _ => DistanceFog {
             color: clear_color,

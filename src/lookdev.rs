@@ -1,7 +1,7 @@
 //! Look-development views for checking the art: `rust-fps lookdev` starts a
 //! sandbox match (no waves) with the camera fixed at a set view and the HUD
-//! hidden, for side-by-side screenshots. Options: `--map 0-2`, `--night`,
-//! `--view spawn|street|overhead|lineup|side|guns|heads|markers`. The lineup views show every
+//! hidden, for side-by-side screenshots. Options: `--map 0-3`, `--night`,
+//! `--view spawn|street|overhead|pier|market|lineup|side|guns|heads|markers`. The lineup views show every
 //! hero, one of each zombie, every gun and a wall section in a yard off to
 //! the side of the map, under that map's light.
 
@@ -25,6 +25,8 @@ pub enum View {
     Street,
     /// High up over a corner of the map.
     Overhead,
+    Pier,
+    Market,
     /// Heroes, zombies, guns and a wall, from the front.
     Lineup,
     /// The same, turned side on.
@@ -43,6 +45,8 @@ impl View {
             "spawn" => View::Spawn,
             "street" => View::Street,
             "overhead" => View::Overhead,
+            "pier" => View::Pier,
+            "market" => View::Market,
             "lineup" => View::Lineup,
             "side" => View::Side,
             "guns" => View::Guns,
@@ -53,7 +57,7 @@ impl View {
     }
 
     fn lineup(self) -> bool {
-        !matches!(self, View::Spawn | View::Street | View::Overhead)
+        !matches!(self, View::Spawn | View::Street | View::Overhead | View::Pier | View::Market)
     }
 }
 
@@ -98,7 +102,8 @@ fn hold_camera(
         return;
     };
     let (tf, _, children) = &mut *cam;
-    if v == View::Spawn {
+    let is_sand = map.0.ground_kind == crate::maps::Ground::Sand;
+    if v == View::Spawn && !is_sand {
         return;
     }
     // No first-person gun away from the player.
@@ -108,12 +113,21 @@ fn hold_camera(
         }
     }
     let (eye, target) = match v {
-        View::Spawn => return,
+        View::Spawn => (
+            map.0.player_spawns.first().copied().unwrap_or(Vec3::ZERO) + Vec3::Y * 1.6,
+            Vec3::new(0.0, 2.2, 20.0),
+        ),
         View::Street => (map.0.extraction + Vec3::Y * 1.6, Vec3::new(0.0, 1.4, 0.0)),
         View::Overhead => {
-            let h = map.0.half;
-            (Vec3::new(h * 0.75, h * 0.6, h * 0.75), Vec3::new(-h * 0.1, 0.0, -h * 0.1))
+            if is_sand {
+                (Vec3::new(-38.0, 48.0, -70.0), Vec3::new(0.0, 8.0, 15.0))
+            } else {
+                let h = map.0.half;
+                (Vec3::new(h * 0.75, h * 0.6, h * 0.75), Vec3::new(-h * 0.1, 0.0, -h * 0.1))
+            }
         }
+        View::Pier => (Vec3::new(14.0, 3.8, -58.0), Vec3::new(0.0, 5.0, 15.0)),
+        View::Market => (Vec3::new(-1.0, 2.8, 6.0), Vec3::new(0.0, 3.2, 28.0)),
         View::Guns => (
             YARD + Vec3::new(-1.6, 1.05, -0.25),
             YARD + Vec3::new(-1.6, 0.6, -1.15),

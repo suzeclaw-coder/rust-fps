@@ -119,7 +119,7 @@ impl MapLayout {
         self.collide(v(x, 2.4, z), v(l, 4.8, w));
     }
 
-    pub(crate) fn bollard(&mut self, x: f32, z: f32) {
+    pub(crate) fn old_bollard(&mut self, x: f32, z: f32) {
         let mut a = Art::default();
         let iron = c(0.12, 0.12, 0.13);
         a.metal
@@ -477,7 +477,7 @@ impl MapLayout {
         self.collide(v(x, 0.5, z), v(w + 1.0, 1.0, 0.2));
     }
 
-    pub(crate) fn rowboat(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn old_rowboat(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         a.paint.blob(v(0.0, 0.2, 0.0), v(0.7, 0.3, 1.9), color);
         a.paint

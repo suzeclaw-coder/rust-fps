@@ -204,7 +204,7 @@ pub fn spawn_camera(mut commands: Commands) {
         bevy::audio::SpatialListener::new(0.25),
         Projection::from(PerspectiveProjection {
             fov: 80f32.to_radians(),
-            near: 0.02,
+            near: 0.05,
             ..default()
         }),
         Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
@@ -326,9 +326,11 @@ fn mouse_look(
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     paused: Res<Paused>,
     aim: Res<crate::weapons::Aim>,
+    menu: Res<crate::emotes::EmoteMenu>,
+    ping_wheel: Res<crate::pings::PingWheel>,
     mut player: Single<&mut LocalPlayer>,
 ) {
-    if !cursor_locked(&cursor) || paused.0 || player.emoting() {
+    if !cursor_locked(&cursor) || paused.0 || player.emoting() || menu.open || ping_wheel.open {
         return;
     }
     // Slower turning when zoomed in, so aim feels the same.

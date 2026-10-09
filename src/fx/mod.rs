@@ -140,6 +140,7 @@ pub enum Fx {
         player: u8,
         pos: [f32; 3],
         target: u32,
+        kind: u8,
     },
     /// Blood splatter and flesh gore from bullet or damage impact on a zombie.
     Blood {

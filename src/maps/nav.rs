@@ -247,7 +247,7 @@ mod tests {
                 errors.push(what);
             }
         };
-        for map in 0..3u8 {
+        for map in 0..4u8 {
             let m = layout(map);
             println!(
                 "map {map}: {} solids, {} lights, {} doorways, {} wall buys, {} spawns",

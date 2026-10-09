@@ -231,13 +231,13 @@ fn update_sights(
         0.0
     };
 
-    // Continuous fire bloom from weapon recoil & spray counter
-    let fire_factor = (loadout.recoil * 1.6 + (loadout.spray as f32).min(12.0) * 0.2).min(2.5);
+    // Continuous fire bloom from weapon recoil, spray counter, and continuous fire spread
+    let fire_factor = (loadout.recoil * 1.5 + (loadout.spray as f32).min(12.0) * 0.15 + loadout.continuous_spread * 15.0).min(3.0);
 
-    let target_bloom = (move_factor + fire_factor).clamp(0.0, 3.0);
+    let target_bloom = (move_factor + fire_factor).clamp(0.0, 3.5);
     let dt = time.delta_secs();
     // Quick pop out on shot/jump, smooth precision recovery when stationary
-    let recovery_speed = if target_bloom > *bloom_smooth { 22.0 } else { 11.0 };
+    let recovery_speed = if target_bloom > *bloom_smooth { 22.0 } else { 12.0 };
     *bloom_smooth += (target_bloom - *bloom_smooth) * (1.0 - (-recovery_speed * dt).exp());
 
     let offset = 9.0 * 2.0 + *bloom_smooth * 12.0;
@@ -339,6 +339,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
+            Transform::default(),
             Pickable::IGNORE,
         ))
         .with_children(|c| {
@@ -560,8 +561,8 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             InGameEntity,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(18.0),
-                bottom: Val::Px(16.0),
+                left: Val::Px(20.0),
+                bottom: Val::Px(224.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
                 ..default()
